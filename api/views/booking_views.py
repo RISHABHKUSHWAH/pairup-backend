@@ -109,10 +109,23 @@ def create_booking(request):
 def list_mine(request):
 
     user = request.user
-    bookings = Booking.objects.filter(Q(learner=user) | Q(mentor=user)).select_related('learner', 'mentor').order_by('-created_at')
+    bookings = Booking.objects.filter(Q(learner=user) | Q(mentor=user)).select_related('learner', 'mentor').prefetch_related('payments').order_by('-created_at')
 
     results = []
     for b in bookings:
+        payment = b.payments.order_by('-created_at').first()
+        payment_status = payment.status if payment else (
+            'held' if b.status == 'paid' else (
+                'released' if b.status == 'completed' else (
+                    'pending_escrow' if b.status == 'accepted' else (
+                        'refunded' if b.status == 'cancelled' else 'unpaid'
+                    )
+                )
+            )
+        )
+        fee = float(payment.platform_fee) if payment else round(float(b.price) * 0.1, 2)
+        net = float(payment.amount - payment.platform_fee) if payment else round(float(b.price) * 0.9, 2)
+
         results.append({
             'id': b.id,
             'learner_id': b.learner_id,
@@ -128,6 +141,10 @@ def list_mine(request):
             'created_at': b.created_at.isoformat() if b.created_at else None,
             'learner_name': b.learner.name,
             'mentor_name': b.mentor.name,
+            'payment_status': payment_status,
+            'payment_id': payment.id if payment else None,
+            'platform_fee': fee,
+            'net_amount': net,
         })
     return success_response(results)
 
