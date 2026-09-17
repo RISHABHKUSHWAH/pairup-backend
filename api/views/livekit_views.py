@@ -111,6 +111,8 @@ def generate_livekit_token(request, booking_id):
         'duration_minutes': booking.duration_minutes,
         'price': float(booking.price),
         'status': booking.status,
+        'scheduled_at': booking.scheduled_at,
+        'scheduled_time': booking.scheduled_at,
         'learner_id': booking.learner_id,
         'learner_name': booking.learner.name,
         'mentor_id': booking.mentor_id,
