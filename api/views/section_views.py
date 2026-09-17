@@ -14,12 +14,17 @@ from ..helpers import error_response, success_response
 @permission_classes([IsAuthenticated, IsMentor])
 def add_experience(request):
     data = request.data or {}
-    job_title = str(data.get('job_title', '')).strip()
+    job_title = str(data.get('job_title') or data.get('role', '')).strip()
     company = str(data.get('company', '')).strip()
     start_date = str(data.get('start_date', '')).strip()
+    if not start_date and data.get('duration'):
+        dur = str(data.get('duration')).strip()
+        start_date = dur.split('-')[0].strip() if '-' in dur else dur
+    if not start_date:
+        start_date = 'Present'
 
-    if not job_title or not company or not start_date:
-        return error_response('job_title, company, and start_date are required', status.HTTP_422_UNPROCESSABLE_ENTITY)
+    if not job_title or not company:
+        return error_response('job_title and company are required', status.HTTP_422_UNPROCESSABLE_ENTITY)
 
     exp = MentorExperience.objects.create(
         user=request.user,
@@ -104,9 +109,9 @@ def delete_education(request, item_id):
 @permission_classes([IsAuthenticated, IsMentor])
 def add_certification(request):
     data = request.data or {}
-    name = str(data.get('name', '')).strip()
+    name = str(data.get('name') or data.get('title', '')).strip()
     if not name:
-        return error_response('name is required', status.HTTP_422_UNPROCESSABLE_ENTITY)
+        return error_response('name or title is required', status.HTTP_422_UNPROCESSABLE_ENTITY)
 
     cert = MentorCertification.objects.create(
         user=request.user,

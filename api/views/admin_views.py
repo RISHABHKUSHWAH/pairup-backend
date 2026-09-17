@@ -67,19 +67,69 @@ def stats(request):
     })
 
 
+def get_users_financial_map():
+    from collections import defaultdict
+    fin = defaultdict(lambda: {'total_spent': 0.0, 'total_earned': 0.0, 'pending_escrow': 0.0, 'payout_count': 0})
+
+    # Learner spend from bookings (held in escrow or released)
+    for row in Payment.objects.filter(booking__isnull=False, status__in=['held', 'released']).values('booking__learner_id').annotate(s=Sum('amount')):
+        lid = row['booking__learner_id']
+        if lid:
+            fin[lid]['total_spent'] += float(row['s'] or 0.0)
+
+    # Learner spend from contracts (held in escrow or released)
+    for row in Payment.objects.filter(contract__isnull=False, status__in=['held', 'released']).values('contract__learner_id').annotate(s=Sum('amount')):
+        lid = row['contract__learner_id']
+        if lid:
+            fin[lid]['total_spent'] += float(row['s'] or 0.0)
+
+    # Mentor earned payouts from bookings (status == 'released')
+    for row in Payment.objects.filter(booking__isnull=False, status='released').values('booking__mentor_id').annotate(gross=Sum('amount'), fee=Sum('platform_fee'), cnt=Count('id')):
+        mid = row['booking__mentor_id']
+        if mid:
+            fin[mid]['total_earned'] += float((row['gross'] or 0.0) - (row['fee'] or 0.0))
+            fin[mid]['payout_count'] += row['cnt'] or 0
+
+    # Mentor earned payouts from contracts (status == 'released')
+    for row in Payment.objects.filter(contract__isnull=False, status='released').values('contract__mentor_id').annotate(gross=Sum('amount'), fee=Sum('platform_fee'), cnt=Count('id')):
+        mid = row['contract__mentor_id']
+        if mid:
+            fin[mid]['total_earned'] += float((row['gross'] or 0.0) - (row['fee'] or 0.0))
+            fin[mid]['payout_count'] += row['cnt'] or 0
+
+    # Mentor pending escrow from bookings (status == 'held')
+    for row in Payment.objects.filter(booking__isnull=False, status='held').values('booking__mentor_id').annotate(gross=Sum('amount'), fee=Sum('platform_fee')):
+        mid = row['booking__mentor_id']
+        if mid:
+            fin[mid]['pending_escrow'] += float((row['gross'] or 0.0) - (row['fee'] or 0.0))
+
+    # Mentor pending escrow from contracts (status == 'held')
+    for row in Payment.objects.filter(contract__isnull=False, status='held').values('contract__mentor_id').annotate(gross=Sum('amount'), fee=Sum('platform_fee')):
+        mid = row['contract__mentor_id']
+        if mid:
+            fin[mid]['pending_escrow'] += float((row['gross'] or 0.0) - (row['fee'] or 0.0))
+
+    return fin
+
+
 @api_view(['GET'])
 @permission_classes([IsAdminOrSuperAdmin])
 def list_users(request):
     role = request.GET.get('role')
+    fin_map = get_users_financial_map()
     if role == 'mentor':
         mentors = MentorProfile.objects.select_related('user').filter(user__role='mentor').order_by('-user__created_at')
-        results = [
-            {
+        results = []
+        for m in mentors:
+            fin = fin_map.get(m.user.id, {'total_spent': 0.0, 'total_earned': 0.0, 'pending_escrow': 0.0, 'payout_count': 0})
+            results.append({
                 'id': m.user.id,
                 'user_id': m.user.id,
                 'mentor_id': m.id,
                 'name': m.user.name,
                 'email': m.user.email,
+                'is_active': m.user.is_active,
+                'is_suspended': not m.user.is_active,
                 'created_at': m.user.created_at.isoformat() if m.user.created_at else None,
                 'title': m.title,
                 'hourly_rate': float(m.hourly_rate),
@@ -88,9 +138,11 @@ def list_users(request):
                 'disputes_count': m.disputes_count,
                 'online_status': m.online_status,
                 'approval_status': m.approval_status,
-            }
-            for m in mentors
-        ]
+                'total_spent': round(fin['total_spent'], 2),
+                'total_earned': round(fin['total_earned'], 2),
+                'pending_escrow': round(fin['pending_escrow'], 2),
+                'payout_count': fin['payout_count'],
+            })
     else:
         qs = User.objects.all()
         if role == 'learner':
@@ -98,16 +150,22 @@ def list_users(request):
         else:
             qs = qs.exclude(role='admin')
         qs = qs.order_by('-created_at')
-        results = [
-            {
+        results = []
+        for u in qs:
+            fin = fin_map.get(u.id, {'total_spent': 0.0, 'total_earned': 0.0, 'pending_escrow': 0.0, 'payout_count': 0})
+            results.append({
                 'id': u.id,
                 'name': u.name,
                 'email': u.email,
                 'role': u.role,
+                'is_active': u.is_active,
+                'is_suspended': not u.is_active,
                 'created_at': u.created_at.isoformat() if u.created_at else None,
-            }
-            for u in qs
-        ]
+                'total_spent': round(fin['total_spent'], 2),
+                'total_earned': round(fin['total_earned'], 2),
+                'pending_escrow': round(fin['pending_escrow'], 2),
+                'payout_count': fin['payout_count'],
+            })
 
     return success_response(results)
 
@@ -116,14 +174,22 @@ def list_users(request):
 @permission_classes([IsAdminOrSuperAdmin])
 def list_all_users(request):
     users = User.objects.all().select_related('mentor_profile').order_by('-created_at')
+    fin_map = get_users_financial_map()
     results = []
     for u in users:
+        fin = fin_map.get(u.id, {'total_spent': 0.0, 'total_earned': 0.0, 'pending_escrow': 0.0, 'payout_count': 0})
         item = {
             'id': u.id,
             'name': u.name,
             'email': u.email,
             'role': u.role,
+            'is_active': u.is_active,
+            'is_suspended': not u.is_active,
             'created_at': u.created_at.isoformat() if u.created_at else None,
+            'total_spent': round(fin['total_spent'], 2),
+            'total_earned': round(fin['total_earned'], 2),
+            'pending_escrow': round(fin['pending_escrow'], 2),
+            'payout_count': fin['payout_count'],
         }
         mp = getattr(u, 'mentor_profile', None)
         if mp:
@@ -141,23 +207,62 @@ def list_all_users(request):
 @api_view(['GET'])
 @permission_classes([IsAdminOrSuperAdmin])
 def list_payments(request):
-    payments = Payment.objects.select_related('booking', 'booking__learner', 'booking__mentor').order_by('-created_at')
-    results = [
-        {
+    payments = Payment.objects.select_related(
+        'booking', 'booking__learner', 'booking__mentor',
+        'contract', 'contract__learner', 'contract__mentor'
+    ).order_by('-created_at')
+    results = []
+    for p in payments:
+        booking_id = None
+        contract_id = None
+        topic = 'Platform Payment'
+        booking_status = None
+        learner_name = 'Learner'
+        mentor_name = 'Mentor'
+        learner_id = None
+        mentor_id = None
+        payment_type = 'booking'
+
+        if p.booking:
+            booking_id = p.booking.id
+            topic = p.booking.topic or '1-on-1 Session'
+            booking_status = p.booking.status
+            if p.booking.learner:
+                learner_name = p.booking.learner.name
+                learner_id = p.booking.learner.id
+            if p.booking.mentor:
+                mentor_name = p.booking.mentor.name
+                mentor_id = p.booking.mentor.id
+            payment_type = 'booking'
+        elif p.contract:
+            contract_id = p.contract.id
+            topic = p.contract.title or 'Mentorship Contract'
+            booking_status = p.contract.status
+            if p.contract.learner:
+                learner_name = p.contract.learner.name
+                learner_id = p.contract.learner.id
+            if p.contract.mentor:
+                mentor_name = p.contract.mentor.name
+                mentor_id = p.contract.mentor.id
+            payment_type = 'contract'
+
+        results.append({
             'id': p.id,
             'amount': float(p.amount),
             'platform_fee': float(p.platform_fee),
             'net_payout': float(p.amount - p.platform_fee),
             'status': p.status,
             'created_at': p.created_at.isoformat() if p.created_at else None,
-            'booking_id': p.booking.id,
-            'topic': p.booking.topic,
-            'booking_status': p.booking.status,
-            'learner_name': p.booking.learner.name,
-            'mentor_name': p.booking.mentor.name,
-        }
-        for p in payments
-    ]
+            'booking_id': booking_id,
+            'contract_id': contract_id,
+            'payment_type': payment_type,
+            'topic': topic,
+            'booking_status': booking_status,
+            'learner_id': learner_id,
+            'learner_name': learner_name,
+            'mentor_id': mentor_id,
+            'mentor_name': mentor_name,
+        })
     return success_response(results)
 
 
@@ -296,7 +401,7 @@ def payouts(request):
     mentors = MentorProfile.objects.select_related('user').filter(user__role='mentor').order_by('user__name')
     results = []
     for m in mentors:
-        payments = Payment.objects.filter(booking__mentor=m.user)
+        payments = Payment.objects.filter(Q(booking__mentor=m.user) | Q(contract__mentor=m.user))
         gross_paid = payments.filter(status='released').aggregate(s=Sum('amount'))['s'] or 0.0
         fee_taken = payments.filter(status='released').aggregate(s=Sum('platform_fee'))['s'] or 0.0
         net_paid_out = gross_paid - fee_taken
@@ -426,20 +531,47 @@ def admin_close_problem(request, problem_id):
 @api_view(['GET'])
 @permission_classes([IsAdminOrSuperAdmin])
 def list_refunds(request):
-    refunds = Payment.objects.filter(status='refunded').select_related('booking', 'booking__learner', 'booking__mentor').order_by('-created_at')
-    results = [
-        {
+    refunds = Payment.objects.filter(status='refunded').select_related(
+        'booking', 'booking__learner', 'booking__mentor',
+        'contract', 'contract__learner', 'contract__mentor'
+    ).order_by('-created_at')
+    results = []
+    for p in refunds:
+        booking_id = None
+        contract_id = None
+        topic = 'Platform Payment'
+        dispute_reason = ''
+        learner_name = 'Learner'
+        mentor_name = 'Mentor'
+
+        if p.booking:
+            booking_id = p.booking.id
+            topic = p.booking.topic or '1-on-1 Session'
+            dispute_reason = getattr(p.booking, 'dispute_reason', '') or ''
+            if p.booking.learner:
+                learner_name = p.booking.learner.name
+            if p.booking.mentor:
+                mentor_name = p.booking.mentor.name
+        elif p.contract:
+            contract_id = p.contract.id
+            topic = p.contract.title or 'Mentorship Contract'
+            dispute_reason = getattr(p.contract, 'dispute_reason', '') or ''
+            if p.contract.learner:
+                learner_name = p.contract.learner.name
+            if p.contract.mentor:
+                mentor_name = p.contract.mentor.name
+
+        results.append({
             'id': p.id,
             'amount': float(p.amount),
             'created_at': p.created_at.isoformat() if p.created_at else None,
-            'booking_id': p.booking.id,
-            'topic': p.booking.topic,
-            'dispute_reason': p.booking.dispute_reason,
-            'learner_name': p.booking.learner.name,
-            'mentor_name': p.booking.mentor.name,
-        }
-        for p in refunds
-    ]
+            'booking_id': booking_id,
+            'contract_id': contract_id,
+            'topic': topic,
+            'dispute_reason': dispute_reason,
+            'learner_name': learner_name,
+            'mentor_name': mentor_name,
+        })
     return success_response(results)
 
 
@@ -566,5 +698,60 @@ def admin_switch_user_role(request, user_id):
             'name': target_user.name,
             'email': target_user.email,
             'role': target_user.role,
+        }
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminOrSuperAdmin])
+def admin_toggle_suspend_user(request, user_id):
+    try:
+        target_user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return error_response('User not found', status.HTTP_404_NOT_FOUND)
+
+    if request.user.id == target_user.id:
+        return error_response('You cannot suspend your own account', status.HTTP_400_BAD_REQUEST)
+
+    if target_user.role == 'superadmin':
+        return error_response('Cannot suspend a superadmin account', status.HTTP_403_FORBIDDEN)
+    if target_user.role == 'admin' and request.user.role != 'superadmin':
+        return error_response('Only superadmins can suspend an admin account', status.HTTP_403_FORBIDDEN)
+
+    data = request.data or {}
+    if 'suspend' in data:
+        should_suspend = bool(data['suspend'])
+    else:
+        # Toggle current state: if currently active, next state is suspend
+        should_suspend = target_user.is_active
+
+    target_user.is_active = not should_suspend
+    target_user.save()
+
+    # Sync mentor profile if user is a mentor
+    mentor_profile = MentorProfile.objects.filter(user=target_user).first()
+    if mentor_profile:
+        if should_suspend:
+            mentor_profile.online_status = 0
+            mentor_profile.approval_status = 'suspended'
+        else:
+            if mentor_profile.approval_status == 'suspended':
+                mentor_profile.approval_status = 'approved'
+        mentor_profile.save()
+
+    action = 'user.suspend' if should_suspend else 'user.reactivate'
+    log_audit(request.user, action, 'user', target_user.id)
+
+    action_label = 'suspended' if should_suspend else 'reactivated'
+    return success_response({
+        'message': f'User account {target_user.name} has been {action_label} successfully.',
+        'user': {
+            'id': target_user.id,
+            'user_id': target_user.id,
+            'name': target_user.name,
+            'email': target_user.email,
+            'role': target_user.role,
+            'is_active': target_user.is_active,
+            'is_suspended': not target_user.is_active,
         }
     })

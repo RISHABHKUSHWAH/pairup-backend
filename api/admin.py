@@ -37,8 +37,19 @@ class PaymentAdmin(admin.ModelAdmin):
 
 @admin.register(Message)
 class MessageAdmin(admin.ModelAdmin):
-    list_display = ('id', 'sender', 'receiver', 'created_at')
-    search_fields = ('sender__name', 'receiver__name', 'body')
+    list_display = ('id', 'sender', 'receiver', 'decrypted_preview', 'is_encrypted', 'created_at')
+    search_fields = ('sender__name', 'receiver__name')
+    readonly_fields = ('decrypted_preview',)
+
+    def decrypted_preview(self, obj):
+        text = obj.decrypted_body or ''
+        return text[:50] + ('...' if len(text) > 50 else '')
+    decrypted_preview.short_description = 'Decrypted Content'
+
+    def is_encrypted(self, obj):
+        return bool(obj.body and obj.body.startswith('enc:v1:'))
+    is_encrypted.boolean = True
+    is_encrypted.short_description = 'Encrypted'
 
 
 @admin.register(Review)

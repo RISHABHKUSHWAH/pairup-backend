@@ -4,13 +4,14 @@ from rest_framework import status
 from django.db.models import Q
 from ..models import User, MentorProfile, Booking, Payment, SessionNote
 from ..permissions import IsLearner, IsMentor
-from ..helpers import error_response, success_response, get_commission_percent
+from ..helpers import error_response, success_response, get_commission_percent, log_audit
 from ..notifications import (
     notify_booking_created,
     notify_booking_accepted,
     notify_payment_held,
     notify_session_completed,
     notify_dispute_raised,
+    notify_booking_cancelled,
 )
 
 
@@ -37,6 +38,13 @@ def create_booking(request):
         price = float(data.get('price', 0))
     except (ValueError, TypeError):
         price = 0.0
+
+    if price <= 0 and mentor_id > 0:
+        prof = MentorProfile.objects.filter(user_id=mentor_id).first()
+        if prof and prof.hourly_rate:
+            price = round(float(prof.hourly_rate) * (duration / 60.0), 2)
+        else:
+            price = 50.0
 
     if mentor_id <= 0 or not topic or price <= 0:
         return error_response('mentor_id, topic, and price are required', status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -169,6 +177,52 @@ def dispute_booking(request, booking_id):
 
     notify_dispute_raised(booking, reason, user)
     return success_response({'message': 'Dispute raised. Our team will review and resolve it.'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_booking(request, booking_id):
+    user = request.user
+    data = request.data or {}
+    reason = str(data.get('reason', '')).strip()
+
+    try:
+        booking = Booking.objects.select_related('learner', 'mentor').get(
+            Q(learner=user) | Q(mentor=user),
+            id=booking_id
+        )
+    except Booking.DoesNotExist:
+        return error_response('Booking not found or not yours', status.HTTP_404_NOT_FOUND)
+
+    if booking.status in ['completed', 'cancelled', 'disputed']:
+        return error_response(f'Cannot cancel a session that is already {booking.status}', status.HTTP_400_BAD_REQUEST)
+
+    booking.status = 'cancelled'
+    if reason:
+        booking.dispute_reason = f"Cancelled: {reason}"
+    booking.save()
+
+    refunded = False
+    payment = Payment.objects.filter(booking=booking, status='held').first()
+    if payment:
+        payment.status = 'refunded'
+        payment.save()
+        refunded = True
+
+    log_audit(
+        user,
+        'cancel_booking',
+        'Booking',
+        booking.id,
+        f"Cancelled by {user.role} {user.name}." + (f" Reason: {reason}" if reason else "") + (" Escrow refunded." if refunded else "")
+    )
+
+    notify_booking_cancelled(booking, user, reason)
+
+    msg = 'Session cancelled successfully.'
+    if refunded:
+        msg += ' Escrow payment has been refunded to the learner wallet.'
+    return success_response({'message': msg})
 
 
 @api_view(['GET'])

@@ -80,6 +80,8 @@ def list_users(request):
                 'mentor_id': m.id,
                 'name': m.user.name,
                 'email': m.user.email,
+                'is_active': m.user.is_active,
+                'is_suspended': not m.user.is_active,
                 'created_at': m.user.created_at.isoformat() if m.user.created_at else None,
                 'title': m.title,
                 'hourly_rate': float(m.hourly_rate),
@@ -104,6 +106,8 @@ def list_users(request):
                 'name': u.name,
                 'email': u.email,
                 'role': u.role,
+                'is_active': u.is_active,
+                'is_suspended': not u.is_active,
                 'created_at': u.created_at.isoformat() if u.created_at else None,
             }
             for u in qs
@@ -123,6 +127,8 @@ def list_all_users(request):
             'name': u.name,
             'email': u.email,
             'role': u.role,
+            'is_active': u.is_active,
+            'is_suspended': not u.is_active,
             'created_at': u.created_at.isoformat() if u.created_at else None,
         }
         mp = getattr(u, 'mentor_profile', None)
@@ -141,23 +147,54 @@ def list_all_users(request):
 @api_view(['GET'])
 @permission_classes([IsAdminOrSuperAdmin])
 def list_payments(request):
-    payments = Payment.objects.select_related('booking', 'booking__learner', 'booking__mentor').order_by('-created_at')
-    results = [
-        {
+    payments = Payment.objects.select_related(
+        'booking', 'booking__learner', 'booking__mentor',
+        'contract', 'contract__learner', 'contract__mentor'
+    ).order_by('-created_at')
+    results = []
+    for p in payments:
+        booking_id = None
+        contract_id = None
+        topic = 'Platform Payment'
+        booking_status = None
+        learner_name = 'Learner'
+        mentor_name = 'Mentor'
+        payment_type = 'booking'
+
+        if p.booking:
+            booking_id = p.booking.id
+            topic = p.booking.topic or '1-on-1 Session'
+            booking_status = p.booking.status
+            if p.booking.learner:
+                learner_name = p.booking.learner.name
+            if p.booking.mentor:
+                mentor_name = p.booking.mentor.name
+            payment_type = 'booking'
+        elif p.contract:
+            contract_id = p.contract.id
+            topic = p.contract.title or 'Mentorship Contract'
+            booking_status = p.contract.status
+            if p.contract.learner:
+                learner_name = p.contract.learner.name
+            if p.contract.mentor:
+                mentor_name = p.contract.mentor.name
+            payment_type = 'contract'
+
+        results.append({
             'id': p.id,
             'amount': float(p.amount),
             'platform_fee': float(p.platform_fee),
             'net_payout': float(p.amount - p.platform_fee),
             'status': p.status,
             'created_at': p.created_at.isoformat() if p.created_at else None,
-            'booking_id': p.booking.id,
-            'topic': p.booking.topic,
-            'booking_status': p.booking.status,
-            'learner_name': p.booking.learner.name,
-            'mentor_name': p.booking.mentor.name,
-        }
-        for p in payments
-    ]
+            'booking_id': booking_id,
+            'contract_id': contract_id,
+            'payment_type': payment_type,
+            'topic': topic,
+            'booking_status': booking_status,
+            'learner_name': learner_name,
+            'mentor_name': mentor_name,
+        })
     return success_response(results)
 
 
@@ -296,7 +333,7 @@ def payouts(request):
     mentors = MentorProfile.objects.select_related('user').filter(user__role='mentor').order_by('user__name')
     results = []
     for m in mentors:
-        payments = Payment.objects.filter(booking__mentor=m.user)
+        payments = Payment.objects.filter(Q(booking__mentor=m.user) | Q(contract__mentor=m.user))
         gross_paid = payments.filter(status='released').aggregate(s=Sum('amount'))['s'] or 0.0
         fee_taken = payments.filter(status='released').aggregate(s=Sum('platform_fee'))['s'] or 0.0
         net_paid_out = gross_paid - fee_taken
@@ -426,20 +463,47 @@ def admin_close_problem(request, problem_id):
 @api_view(['GET'])
 @permission_classes([IsAdminOrSuperAdmin])
 def list_refunds(request):
-    refunds = Payment.objects.filter(status='refunded').select_related('booking', 'booking__learner', 'booking__mentor').order_by('-created_at')
-    results = [
-        {
+    refunds = Payment.objects.filter(status='refunded').select_related(
+        'booking', 'booking__learner', 'booking__mentor',
+        'contract', 'contract__learner', 'contract__mentor'
+    ).order_by('-created_at')
+    results = []
+    for p in refunds:
+        booking_id = None
+        contract_id = None
+        topic = 'Platform Payment'
+        dispute_reason = ''
+        learner_name = 'Learner'
+        mentor_name = 'Mentor'
+
+        if p.booking:
+            booking_id = p.booking.id
+            topic = p.booking.topic or '1-on-1 Session'
+            dispute_reason = getattr(p.booking, 'dispute_reason', '') or ''
+            if p.booking.learner:
+                learner_name = p.booking.learner.name
+            if p.booking.mentor:
+                mentor_name = p.booking.mentor.name
+        elif p.contract:
+            contract_id = p.contract.id
+            topic = p.contract.title or 'Mentorship Contract'
+            dispute_reason = getattr(p.contract, 'dispute_reason', '') or ''
+            if p.contract.learner:
+                learner_name = p.contract.learner.name
+            if p.contract.mentor:
+                mentor_name = p.contract.mentor.name
+
+        results.append({
             'id': p.id,
             'amount': float(p.amount),
             'created_at': p.created_at.isoformat() if p.created_at else None,
-            'booking_id': p.booking.id,
-            'topic': p.booking.topic,
-            'dispute_reason': p.booking.dispute_reason,
-            'learner_name': p.booking.learner.name,
-            'mentor_name': p.booking.mentor.name,
-        }
-        for p in refunds
-    ]
+            'booking_id': booking_id,
+            'contract_id': contract_id,
+            'topic': topic,
+            'dispute_reason': dispute_reason,
+            'learner_name': learner_name,
+            'mentor_name': mentor_name,
+        })
     return success_response(results)
 
 
@@ -566,5 +630,60 @@ def admin_switch_user_role(request, user_id):
             'name': target_user.name,
             'email': target_user.email,
             'role': target_user.role,
+        }
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminOrSuperAdmin])
+def admin_toggle_suspend_user(request, user_id):
+    try:
+        target_user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return error_response('User not found', status.HTTP_404_NOT_FOUND)
+
+    if request.user.id == target_user.id:
+        return error_response('You cannot suspend your own account', status.HTTP_400_BAD_REQUEST)
+
+    if target_user.role == 'superadmin':
+        return error_response('Cannot suspend a superadmin account', status.HTTP_403_FORBIDDEN)
+    if target_user.role == 'admin' and request.user.role != 'superadmin':
+        return error_response('Only superadmins can suspend an admin account', status.HTTP_403_FORBIDDEN)
+
+    data = request.data or {}
+    if 'suspend' in data:
+        should_suspend = bool(data['suspend'])
+    else:
+        # Toggle current state: if currently active, next state is suspend
+        should_suspend = target_user.is_active
+
+    target_user.is_active = not should_suspend
+    target_user.save()
+
+    # Sync mentor profile if user is a mentor
+    mentor_profile = MentorProfile.objects.filter(user=target_user).first()
+    if mentor_profile:
+        if should_suspend:
+            mentor_profile.online_status = 0
+            mentor_profile.approval_status = 'suspended'
+        else:
+            if mentor_profile.approval_status == 'suspended':
+                mentor_profile.approval_status = 'approved'
+        mentor_profile.save()
+
+    action = 'user.suspend' if should_suspend else 'user.reactivate'
+    log_audit(request.user, action, 'user', target_user.id)
+
+    action_label = 'suspended' if should_suspend else 'reactivated'
+    return success_response({
+        'message': f'User account {target_user.name} has been {action_label} successfully.',
+        'user': {
+            'id': target_user.id,
+            'user_id': target_user.id,
+            'name': target_user.name,
+            'email': target_user.email,
+            'role': target_user.role,
+            'is_active': target_user.is_active,
+            'is_suspended': not target_user.is_active,
         }
     })

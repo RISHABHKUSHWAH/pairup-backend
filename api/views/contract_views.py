@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django.db.models import Q
 from ..models import User, MentorProfile, Contract, Booking, Payment, Review
 from ..helpers import error_response, success_response, get_commission_percent, log_audit
+from ..slot_utils import parse_iso_datetime, check_slot_conflict
 from ..notifications import (
     notify_contract_proposed,
     notify_contract_paid,
@@ -207,9 +209,22 @@ def contract_detail(request, contract_id):
             'created_at': payment.created_at.isoformat() if payment.created_at else None,
         }
 
+    # Fetch review if submitted
+    review = Review.objects.filter(booking__contract=contract).select_related('learner').first()
+    review_data = None
+    if review:
+        review_data = {
+            'id': review.id,
+            'rating': review.rating,
+            'comment': review.comment,
+            'learner_name': review.learner.name,
+            'created_at': review.created_at.isoformat() if review.created_at else None,
+        }
+
     data = _format_contract_summary(contract)
     data['sessions'] = sessions_data
     data['payment'] = payment_data
+    data['review'] = review_data
 
     return success_response(data)
 
@@ -308,8 +323,8 @@ def complete_contract_by_mentor(request, contract_id):
 def approve_contract(request, contract_id):
     """
     Learner reviews all completed sessions and approves the contract.
+    Requires learner to provide rating & feedback before releasing the escrow payment.
     Releases the held escrow payment to the mentor and increments mentor completed sessions.
-    Optional: Accepts rating & comment to record a review.
     """
     user = request.user
     try:
@@ -320,6 +335,24 @@ def approve_contract(request, contract_id):
         )
     except Contract.DoesNotExist:
         return error_response('Contract not found, not yours, or already completed/disputed', status.HTTP_404_NOT_FOUND)
+
+    # Validate rating and feedback review
+    data = request.data or {}
+    rating = data.get('rating')
+    comment = str(data.get('comment', '')).strip()
+
+    if not rating:
+        return error_response('A star rating (1 to 5) is required before releasing payment.', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    try:
+        rating_val = int(rating)
+        if rating_val < 1 or rating_val > 5:
+            return error_response('Rating must be between 1 and 5 stars.', status.HTTP_422_UNPROCESSABLE_ENTITY)
+    except (ValueError, TypeError):
+        return error_response('Invalid rating value provided.', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    if not comment:
+        return error_response('Written feedback is required before approving and releasing payment.', status.HTTP_422_UNPROCESSABLE_ENTITY)
 
     contract.status = 'completed'
     contract.save()
@@ -335,35 +368,34 @@ def approve_contract(request, contract_id):
     mentor_profile.sessions_completed += contract.total_sessions
     mentor_profile.save()
 
-    # Optional: Save learner review
-    data = request.data or {}
-    rating = data.get('rating')
-    comment = str(data.get('comment', '')).strip()
-    if rating is not None:
-        try:
-            rating_val = max(1, min(5, int(rating)))
-            first_booking = Booking.objects.filter(contract=contract).first()
-            if first_booking and not Review.objects.filter(booking=first_booking).exists():
-                Review.objects.create(
-                    booking=first_booking,
-                    learner=contract.learner,
-                    mentor=contract.mentor,
-                    rating=rating_val,
-                    comment=comment
-                )
-                # Recalculate mentor average rating
-                all_reviews = Review.objects.filter(mentor=contract.mentor)
-                if all_reviews.exists():
-                    mentor_profile.rating_avg = round(sum(r.rating for r in all_reviews) / all_reviews.count(), 1)
-                    mentor_profile.save()
-        except (ValueError, TypeError):
-            pass
+    # Save learner review
+    first_booking = Booking.objects.filter(contract=contract).first()
+    if first_booking:
+        review_obj, created = Review.objects.get_or_create(
+            booking=first_booking,
+            defaults={
+                'learner': contract.learner,
+                'mentor': contract.mentor,
+                'rating': rating_val,
+                'comment': comment
+            }
+        )
+        if not created:
+            review_obj.rating = rating_val
+            review_obj.comment = comment
+            review_obj.save()
+
+        # Recalculate mentor average rating
+        all_reviews = Review.objects.filter(mentor=contract.mentor)
+        if all_reviews.exists():
+            mentor_profile.rating_avg = round(sum(r.rating for r in all_reviews) / all_reviews.count(), 1)
+            mentor_profile.save()
 
     notify_contract_approved(contract)
-    log_audit(user, 'contract_approved_release_escrow', 'Contract', contract.id, f"Learner approved contract; ₹{contract.total_price} released to mentor")
+    log_audit(user, 'contract_approved_release_escrow', 'Contract', contract.id, f"Learner approved contract; ₹{contract.total_price} released to mentor. Rating: {rating_val}/5")
 
     return success_response({
-        'message': f"Contract approved! Escrow funds (₹{contract.total_price:,.0f}) have been released to {contract.mentor.name}.",
+        'message': f"Contract approved! Rating & feedback submitted and escrow funds (₹{contract.total_price:,.0f}) have been released to {contract.mentor.name}.",
         'status': contract.status
     })
 
@@ -457,6 +489,19 @@ def schedule_contract_session(request, contract_id, session_id):
         )
     except Booking.DoesNotExist:
         return error_response('Milestone session not found or not yours', status.HTTP_404_NOT_FOUND)
+
+    req_start = parse_iso_datetime(scheduled_at)
+    if not req_start:
+        return error_response('Invalid scheduled_at format. Expected ISO-8601', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    now = datetime.now()
+    if req_start < now - timedelta(minutes=5):
+        return error_response('Cannot schedule a session in the past', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    duration = session.duration_minutes or 60
+    has_conflict, _ = check_slot_conflict(session.mentor_id, req_start, duration, exclude_booking_id=session.id)
+    if has_conflict:
+        return error_response('This date and time is already booked by another learner. Please select an available slot.', status.HTTP_409_CONFLICT)
 
     session.scheduled_at = scheduled_at
     session.save()

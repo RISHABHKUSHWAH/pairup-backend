@@ -251,7 +251,8 @@ def notify_chat_message(message):
     """
     try:
         sender_name = message.sender.name
-        body_snippet = message.body[:70] + ('...' if len(message.body) > 70 else '')
+        plain_text = getattr(message, 'decrypted_body', message.body)
+        body_snippet = plain_text[:70] + ('...' if len(plain_text) > 70 else '')
         create_notification(
             user=message.receiver,
             title=f"New message from {sender_name} 💬",
@@ -442,4 +443,27 @@ def notify_contract_disputed(contract, reason, raised_by):
             )
     except Exception as e:
         logger.warning(f"Error in notify_contract_disputed: {e}")
+
+
+def notify_booking_cancelled(booking, cancelled_by, reason=''):
+    """
+    Alerts the counterpart when a session is cancelled.
+    """
+    try:
+        is_learner = (cancelled_by.id == booking.learner_id)
+        counterpart = booking.mentor if is_learner else booking.learner
+        role_label = 'Learner' if is_learner else 'Mentor'
+        reason_txt = f" Reason: {reason}" if reason else ""
+        link = '/mentor/sessions' if counterpart.role == 'mentor' else '/learner/sessions'
+
+        create_notification(
+            user=counterpart,
+            title='Session Cancelled ⚠️',
+            message=f"{role_label} {cancelled_by.name} has cancelled the session '{booking.topic}'.{reason_txt}",
+            notification_type='session',
+            link=link,
+        )
+    except Exception as e:
+        logger.warning(f"Error in notify_booking_cancelled: {e}")
+
 

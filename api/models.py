@@ -55,6 +55,7 @@ class MentorProfile(models.Model):
         ('pending', 'Pending'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+        ('suspended', 'Suspended'),
     )
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='mentor_profile')
@@ -247,7 +248,21 @@ class Message(models.Model):
     booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name='messages')
     contract = models.ForeignKey(Contract, on_delete=models.SET_NULL, null=True, blank=True, related_name='messages')
     body = models.TextField()
+    deleted_by_sender = models.BooleanField(default=False)
+    deleted_by_receiver = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def decrypted_body(self):
+        from .crypto import decrypt_text
+        return decrypt_text(self.body)
+
+    def save(self, *args, **kwargs):
+        if self.body:
+            from .crypto import CIPHER_PREFIX, encrypt_text
+            if not self.body.startswith(CIPHER_PREFIX):
+                self.body = encrypt_text(self.body)
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ['created_at']

@@ -3,7 +3,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from api.models import (
     User, MentorProfile, Booking, Payment, Review,
-    ProblemPost, ProblemProposal, PlatformSetting, SitePage
+    ProblemPost, ProblemProposal, PlatformSetting, SitePage, Message
 )
 from api.auth import generate_jwt
 
@@ -249,6 +249,71 @@ class PairUpApiTests(TestCase):
         self.assertEqual(booking.status, 'cancelled')
         self.assertEqual(booking.payments.first().status, 'refunded')
 
+    def test_cancel_booking_learner_and_mentor(self):
+        # 1. Learner creates a booking (pending)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Cancel Test Pending',
+            'duration_minutes': 60,
+            'price': 50.0
+        }, format='json')
+        booking_id = res.data['id']
+
+        # Learner cancels pending booking
+        res_cancel = self.client.post(f'/api/bookings/{booking_id}/cancel', {'reason': 'Learner changed mind'}, format='json')
+        self.assertEqual(res_cancel.status_code, status.HTTP_200_OK)
+        booking = Booking.objects.get(id=booking_id)
+        self.assertEqual(booking.status, 'cancelled')
+        self.assertIn('Learner changed mind', booking.dispute_reason)
+
+        # Cannot cancel again
+        res_cancel_again = self.client.post(f'/api/bookings/{booking_id}/cancel', {}, format='json')
+        self.assertEqual(res_cancel_again.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 2. Mentor accepts a new booking, then mentor cancels
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res2 = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Cancel Test Mentor',
+            'duration_minutes': 30,
+            'price': 25.0
+        }, format='json')
+        booking2_id = res2.data['id']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        self.client.post(f'/api/bookings/{booking2_id}/accept')
+
+        # Mentor cancels accepted booking
+        res_mentor_cancel = self.client.post(f'/api/bookings/{booking2_id}/cancel', {'reason': 'Mentor unavailable'}, format='json')
+        self.assertEqual(res_mentor_cancel.status_code, status.HTTP_200_OK)
+        booking2 = Booking.objects.get(id=booking2_id)
+        self.assertEqual(booking2.status, 'cancelled')
+
+        # 3. Learner pays for a booking (escrow held), then cancels -> payment status refunded
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res3 = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Cancel Test Paid Escrow',
+            'duration_minutes': 60,
+            'price': 50.0
+        }, format='json')
+        booking3_id = res3.data['id']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        self.client.post(f'/api/bookings/{booking3_id}/accept')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        self.client.post(f'/api/bookings/{booking3_id}/pay')
+        booking3 = Booking.objects.get(id=booking3_id)
+        self.assertEqual(booking3.status, 'paid')
+        self.assertEqual(booking3.payments.first().status, 'held')
+
+        # Learner cancels paid session
+        res_paid_cancel = self.client.post(f'/api/bookings/{booking3_id}/cancel', {'reason': 'Emergency schedule conflict'}, format='json')
+        self.assertEqual(res_paid_cancel.status_code, status.HTTP_200_OK)
+        booking3.refresh_from_db()
+        self.assertEqual(booking3.status, 'cancelled')
+        self.assertEqual(booking3.payments.first().status, 'refunded')
+
+
     # --- 4. Chat & Anti-Leak Filter ---
     def test_chat_messages_and_leak_filter(self):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
@@ -286,6 +351,120 @@ class PairUpApiTests(TestCase):
         res_list = self.client.get(f'/api/messages?with={self.mentor.id}')
         self.assertEqual(res_list.status_code, status.HTTP_200_OK)
         self.assertEqual(len(res_list.data), 1)
+
+    def test_delete_chat_and_message_rules(self):
+        # 1. Learner sends message to Mentor
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_send = self.client.post('/api/messages', {
+            'receiver_id': self.mentor.id,
+            'body': 'Message to be tested for deletion'
+        }, format='json')
+        self.assertEqual(res_send.status_code, status.HTTP_201_CREATED)
+        msg_id = res_send.data['id']
+
+        # 2. Mentor sends reply to Learner
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        res_reply = self.client.post('/api/messages', {
+            'receiver_id': self.learner.id,
+            'body': 'Reply to be tested'
+        }, format='json')
+        self.assertEqual(res_reply.status_code, status.HTTP_201_CREATED)
+        reply_id = res_reply.data['id']
+
+        # 3. Learner attempts to delete mentor's message for 'everyone' -> Forbidden (only own message)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_forbid = self.client.delete(f'/api/messages/{reply_id}?delete_for=everyone')
+        self.assertEqual(res_forbid.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 4. Learner deletes own recent message for 'everyone' -> Deleted for both
+        res_del_everyone = self.client.delete(f'/api/messages/{msg_id}?delete_for=everyone')
+        self.assertEqual(res_del_everyone.status_code, status.HTTP_200_OK)
+        self.assertFalse(Message.objects.filter(id=msg_id).exists())
+
+        # 5. Learner deletes mentor's message for 'me' -> Hidden for learner, visible for mentor
+        res_del_me = self.client.delete(f'/api/messages/{reply_id}?delete_for=me')
+        self.assertEqual(res_del_me.status_code, status.HTTP_200_OK)
+
+        # Verify learner does not see it
+        res_learner_view = self.client.get(f'/api/messages?with={self.mentor.id}')
+        self.assertEqual(len(res_learner_view.data), 0)
+
+        # Verify mentor STILL sees it
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        res_mentor_view = self.client.get(f'/api/messages?with={self.learner.id}')
+        self.assertEqual(len(res_mentor_view.data), 1)
+        self.assertEqual(res_mentor_view.data[0]['id'], reply_id)
+
+        # 6. Test clear conversation on own side
+        # Mentor sends a new message
+        res_new = self.client.post('/api/messages', {
+            'receiver_id': self.learner.id,
+            'body': 'Another message for clearing'
+        }, format='json')
+        self.assertEqual(res_new.status_code, status.HTTP_201_CREATED)
+
+        # Mentor clears conversation with learner
+        res_clear = self.client.delete(f'/api/messages/clear?with={self.learner.id}')
+        self.assertEqual(res_clear.status_code, status.HTTP_200_OK)
+
+        # Mentor sees 0 messages
+        res_mentor_after = self.client.get(f'/api/messages?with={self.learner.id}')
+        self.assertEqual(len(res_mentor_after.data), 0)
+
+        # Learner STILL sees the message that was sent to them!
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_learner_after = self.client.get(f'/api/messages?with={self.mentor.id}')
+        self.assertEqual(len(res_learner_after.data), 1)
+
+    def test_chat_encryption_at_rest(self):
+        # 1. Learner sends confidential chat message
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        secret_text = 'Confidential project details and discussion topic'
+        res_send = self.client.post('/api/messages', {
+            'receiver_id': self.mentor.id,
+            'body': secret_text
+        }, format='json')
+        self.assertEqual(res_send.status_code, status.HTTP_201_CREATED)
+        msg_id = res_send.data['id']
+
+        # 2. Verify encrypted at rest in Database
+        db_msg = Message.objects.get(id=msg_id)
+        self.assertTrue(db_msg.body.startswith('enc:v1:'))
+        self.assertNotIn(secret_text, db_msg.body)
+        self.assertEqual(db_msg.decrypted_body, secret_text)
+
+        # 3. Verify API endpoints decrypt on-the-fly for authorized participants
+        # Learner views conversation
+        res_learner = self.client.get(f'/api/messages?with={self.mentor.id}')
+        self.assertEqual(res_learner.status_code, status.HTTP_200_OK)
+        found_learner = [m for m in res_learner.data if m['id'] == msg_id]
+        self.assertEqual(len(found_learner), 1)
+        self.assertEqual(found_learner[0]['body'], secret_text)
+
+        # Mentor views conversation
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        res_mentor = self.client.get(f'/api/messages?with={self.learner.id}')
+        self.assertEqual(res_mentor.status_code, status.HTTP_200_OK)
+        found_mentor = [m for m in res_mentor.data if m['id'] == msg_id]
+        self.assertEqual(len(found_mentor), 1)
+        self.assertEqual(found_mentor[0]['body'], secret_text)
+
+        # Mentor views conversations list summary
+        res_conv = self.client.get('/api/messages/conversations')
+        self.assertEqual(res_conv.status_code, status.HTTP_200_OK)
+        conv = next((c for c in res_conv.data if c.get('user_id') == self.learner.id or c.get('other_id') == self.learner.id), None)
+        self.assertIsNotNone(conv)
+        self.assertEqual(conv['last_message'], secret_text)
+
+        # 4. Verify direct crypto helper behaves properly
+        from api.crypto import encrypt_text, decrypt_text
+        cipher = encrypt_text('hello secret')
+        self.assertTrue(cipher.startswith('enc:v1:'))
+        self.assertEqual(decrypt_text(cipher), 'hello secret')
+        # Idempotent (does not double encrypt)
+        self.assertEqual(encrypt_text(cipher), cipher)
+        # Legacy plain text backward compatibility
+        self.assertEqual(decrypt_text('legacy plain'), 'legacy plain')
 
     # --- 5. Reverse Problem Marketplace ---
     def test_problem_post_and_proposal_acceptance(self):
@@ -440,5 +619,176 @@ class PairUpApiTests(TestCase):
         self.assertEqual(res_admin_back.status_code, status.HTTP_200_OK)
         target_user.refresh_from_db()
         self.assertEqual(target_user.role, 'learner')
+
+    # --- 16. Booking Duration & Booked Slots Hiding Tests ---
+    def test_booking_duration_and_slot_hiding(self):
+        # 1. Check initial available slots on a future date (e.g. 2026-10-15)
+        test_date = '2026-10-15'
+        res_slots = self.client.get(f'/api/mentors/{self.mentor.id}/available-slots?date={test_date}&duration=60')
+        self.assertEqual(res_slots.status_code, status.HTTP_200_OK)
+        initial_times = [s['time'] for s in res_slots.data['slots']]
+        self.assertIn('14:00', initial_times)
+        self.assertIn('14:30', initial_times)
+        self.assertIn('15:00', initial_times)
+
+        # 2. Learner books session with duration 60 mins at 14:00
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_book = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'System Architecture Discussion',
+            'duration_minutes': 60,
+            'scheduled_at': f'{test_date}T14:00:00',
+            'price': 50.0
+        }, format='json')
+        self.assertEqual(res_book.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res_book.data['duration_minutes'], 60)
+        self.assertEqual(res_book.data['scheduled_at'], f'{test_date}T14:00:00')
+
+        # 3. Available slots for this date should now HIDE 14:00 and overlapping 14:30
+        res_slots_after = self.client.get(f'/api/mentors/{self.mentor.id}/available-slots?date={test_date}&duration=60')
+        self.assertEqual(res_slots_after.status_code, status.HTTP_200_OK)
+        updated_times = [s['time'] for s in res_slots_after.data['slots']]
+
+        # 14:00 is booked -> NOT SHOWN!
+        self.assertNotIn('14:00', updated_times)
+        # 14:30 would overlap with 14:00-15:00 -> NOT SHOWN!
+        self.assertNotIn('14:30', updated_times)
+        # 13:00 and 15:00 do not overlap -> SHOWN!
+        self.assertIn('13:00', updated_times)
+        self.assertIn('15:00', updated_times)
+
+        # 4. Another learner attempts to book overlapping slot (14:30) -> HTTP 409 Conflict
+        charlie = User.objects.create_user(
+            email='charlie.conflict@example.com',
+            name='Charlie Conflict',
+            password='password123',
+            role='learner'
+        )
+        charlie_token = generate_jwt(charlie)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {charlie_token}')
+
+        res_conflict = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Overlapping booking attempt',
+            'duration_minutes': 30,
+            'scheduled_at': f'{test_date}T14:30:00',
+            'price': 25.0
+        }, format='json')
+        self.assertEqual(res_conflict.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('already booked', res_conflict.data['error'])
+
+        # 5. Non-conflicting slot (15:00) with custom duration (45 mins) succeeds
+        res_free = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Non-conflicting booking',
+            'duration_minutes': 45,
+            'scheduled_at': f'{test_date}T15:00:00',
+            'price': 37.5
+        }, format='json')
+        self.assertEqual(res_free.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(res_free.data['duration_minutes'], 45)
+
+        # 6. Verify booked slots endpoint lists the busy intervals
+        res_booked = self.client.get(f'/api/mentors/{self.mentor.id}/booked-slots')
+        self.assertEqual(res_booked.status_code, status.HTTP_200_OK)
+        booked_list = res_booked.data['booked_slots']
+        self.assertGreaterEqual(len(booked_list), 2)
+
+        # 7. Milestone contract session conflict check
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        from api.models import Contract
+        contract = Contract.objects.create(
+            learner=self.learner,
+            mentor=self.mentor,
+            created_by=self.learner,
+            title='Mentorship Contract',
+            total_sessions=3,
+            status='active'
+        )
+        milestone = Booking.objects.create(
+            learner=self.learner,
+            mentor=self.mentor,
+            contract=contract,
+            session_number=1,
+            duration_minutes=60,
+            status='pending'
+        )
+        # Attempt to schedule milestone at 14:00 (already booked) -> 409 Conflict
+        res_sched = self.client.post(f'/api/contracts/{contract.id}/sessions/{milestone.id}/schedule', {
+            'scheduled_at': f'{test_date}T14:00:00'
+        }, format='json')
+        self.assertEqual(res_sched.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('already booked', res_sched.data['error'])
+
+        # Attempt to schedule milestone at 16:00 (free) -> 200 OK
+        res_sched_ok = self.client.post(f'/api/contracts/{contract.id}/sessions/{milestone.id}/schedule', {
+            'scheduled_at': f'{test_date}T16:00:00'
+        }, format='json')
+        self.assertEqual(res_sched_ok.status_code, status.HTTP_200_OK)
+
+    def test_available_dates_excludes_unavailable_days(self):
+        """
+        Verifies:
+        1. /api/mentors/<id>/available-dates only returns days the mentor has open slots.
+        2. Days where the mentor has no scheduled availability are strictly omitted.
+        3. If all slots on an available day become booked, that day is automatically omitted.
+        """
+        from datetime import datetime, timedelta
+        from api.models import MentorAvailability, MentorProfile
+
+        # Create mentor with availability ONLY on Saturdays (day_of_week=6) from 10:00 to 12:00
+        mentor_user = User.objects.create(email='weekend_mentor@example.com', name='Weekend Mentor', role='mentor')
+        MentorProfile.objects.create(user=mentor_user, hourly_rate=60.0, approval_status='approved')
+        MentorAvailability.objects.create(
+            user=mentor_user,
+            day_of_week=6,  # Saturday
+            start_time='10:00',
+            end_time='12:00'
+        )
+
+        res = self.client.get(f'/api/mentors/{mentor_user.id}/available-dates?duration=60&days=14')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        dates = res.data['available_dates']
+        self.assertGreaterEqual(len(dates), 1)
+
+        # Every single date returned MUST be a Saturday (day_of_week 6)
+        for d in dates:
+            parsed = datetime.strptime(d['date'], '%Y-%m-%d').date()
+            js_day = (parsed.weekday() + 1) % 7
+            self.assertEqual(js_day, 6, f"Expected Saturday (6), got {js_day} for date {d['date']}")
+            self.assertEqual(d['weekday'], 'Saturday')
+
+        first_sat = dates[0]['date']
+
+        # Book the slots on first_sat (10:00-11:00 and 11:00-12:00)
+        Booking.objects.create(
+            learner=self.learner,
+            mentor=mentor_user,
+            topic='Session 1',
+            duration_minutes=60,
+            scheduled_at=f'{first_sat}T10:00:00',
+            price=60.0,
+            status='paid'
+        )
+        Booking.objects.create(
+            learner=self.learner,
+            mentor=mentor_user,
+            topic='Session 2',
+            duration_minutes=60,
+            scheduled_at=f'{first_sat}T11:00:00',
+            price=60.0,
+            status='paid'
+        )
+
+        # Fetch available dates again: first_sat must now be completely gone!
+        res_after = self.client.get(f'/api/mentors/{mentor_user.id}/available-dates?duration=60&days=14')
+        self.assertEqual(res_after.status_code, status.HTTP_200_OK)
+        dates_after = res_after.data['available_dates']
+        date_strings = [d['date'] for d in dates_after]
+        self.assertNotIn(first_sat, date_strings, f"Fully booked date {first_sat} should not be shown")
+
+
+
+
 
 

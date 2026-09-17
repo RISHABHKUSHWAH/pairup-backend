@@ -3,7 +3,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from api.models import (
     User, MentorProfile, Booking, Payment, Review,
-    ProblemPost, ProblemProposal, PlatformSetting, SitePage
+    ProblemPost, ProblemProposal, PlatformSetting, SitePage, Message
 )
 from api.auth import generate_jwt
 
@@ -249,6 +249,71 @@ class PairUpApiTests(TestCase):
         self.assertEqual(booking.status, 'cancelled')
         self.assertEqual(booking.payments.first().status, 'refunded')
 
+    def test_cancel_booking_learner_and_mentor(self):
+        # 1. Learner creates a booking (pending)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Cancel Test Pending',
+            'duration_minutes': 60,
+            'price': 50.0
+        }, format='json')
+        booking_id = res.data['id']
+
+        # Learner cancels pending booking
+        res_cancel = self.client.post(f'/api/bookings/{booking_id}/cancel', {'reason': 'Learner changed mind'}, format='json')
+        self.assertEqual(res_cancel.status_code, status.HTTP_200_OK)
+        booking = Booking.objects.get(id=booking_id)
+        self.assertEqual(booking.status, 'cancelled')
+        self.assertIn('Learner changed mind', booking.dispute_reason)
+
+        # Cannot cancel again
+        res_cancel_again = self.client.post(f'/api/bookings/{booking_id}/cancel', {}, format='json')
+        self.assertEqual(res_cancel_again.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # 2. Mentor accepts a new booking, then mentor cancels
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res2 = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Cancel Test Mentor',
+            'duration_minutes': 30,
+            'price': 25.0
+        }, format='json')
+        booking2_id = res2.data['id']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        self.client.post(f'/api/bookings/{booking2_id}/accept')
+
+        # Mentor cancels accepted booking
+        res_mentor_cancel = self.client.post(f'/api/bookings/{booking2_id}/cancel', {'reason': 'Mentor unavailable'}, format='json')
+        self.assertEqual(res_mentor_cancel.status_code, status.HTTP_200_OK)
+        booking2 = Booking.objects.get(id=booking2_id)
+        self.assertEqual(booking2.status, 'cancelled')
+
+        # 3. Learner pays for a booking (escrow held), then cancels -> payment status refunded
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res3 = self.client.post('/api/bookings', {
+            'mentor_id': self.mentor.id,
+            'topic': 'Cancel Test Paid Escrow',
+            'duration_minutes': 60,
+            'price': 50.0
+        }, format='json')
+        booking3_id = res3.data['id']
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        self.client.post(f'/api/bookings/{booking3_id}/accept')
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        self.client.post(f'/api/bookings/{booking3_id}/pay')
+        booking3 = Booking.objects.get(id=booking3_id)
+        self.assertEqual(booking3.status, 'paid')
+        self.assertEqual(booking3.payments.first().status, 'held')
+
+        # Learner cancels paid session
+        res_paid_cancel = self.client.post(f'/api/bookings/{booking3_id}/cancel', {'reason': 'Emergency schedule conflict'}, format='json')
+        self.assertEqual(res_paid_cancel.status_code, status.HTTP_200_OK)
+        booking3.refresh_from_db()
+        self.assertEqual(booking3.status, 'cancelled')
+        self.assertEqual(booking3.payments.first().status, 'refunded')
+
+
     # --- 4. Chat & Anti-Leak Filter ---
     def test_chat_messages_and_leak_filter(self):
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
@@ -286,6 +351,120 @@ class PairUpApiTests(TestCase):
         res_list = self.client.get(f'/api/messages?with={self.mentor.id}')
         self.assertEqual(res_list.status_code, status.HTTP_200_OK)
         self.assertEqual(len(res_list.data), 1)
+
+    def test_delete_chat_and_message_rules(self):
+        # 1. Learner sends message to Mentor
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_send = self.client.post('/api/messages', {
+            'receiver_id': self.mentor.id,
+            'body': 'Message to be tested for deletion'
+        }, format='json')
+        self.assertEqual(res_send.status_code, status.HTTP_201_CREATED)
+        msg_id = res_send.data['id']
+
+        # 2. Mentor sends reply to Learner
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        res_reply = self.client.post('/api/messages', {
+            'receiver_id': self.learner.id,
+            'body': 'Reply to be tested'
+        }, format='json')
+        self.assertEqual(res_reply.status_code, status.HTTP_201_CREATED)
+        reply_id = res_reply.data['id']
+
+        # 3. Learner attempts to delete mentor's message for 'everyone' -> Forbidden (only own message)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_forbid = self.client.delete(f'/api/messages/{reply_id}?delete_for=everyone')
+        self.assertEqual(res_forbid.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 4. Learner deletes own recent message for 'everyone' -> Deleted for both
+        res_del_everyone = self.client.delete(f'/api/messages/{msg_id}?delete_for=everyone')
+        self.assertEqual(res_del_everyone.status_code, status.HTTP_200_OK)
+        self.assertFalse(Message.objects.filter(id=msg_id).exists())
+
+        # 5. Learner deletes mentor's message for 'me' -> Hidden for learner, visible for mentor
+        res_del_me = self.client.delete(f'/api/messages/{reply_id}?delete_for=me')
+        self.assertEqual(res_del_me.status_code, status.HTTP_200_OK)
+
+        # Verify learner does not see it
+        res_learner_view = self.client.get(f'/api/messages?with={self.mentor.id}')
+        self.assertEqual(len(res_learner_view.data), 0)
+
+        # Verify mentor STILL sees it
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        res_mentor_view = self.client.get(f'/api/messages?with={self.learner.id}')
+        self.assertEqual(len(res_mentor_view.data), 1)
+        self.assertEqual(res_mentor_view.data[0]['id'], reply_id)
+
+        # 6. Test clear conversation on own side
+        # Mentor sends a new message
+        res_new = self.client.post('/api/messages', {
+            'receiver_id': self.learner.id,
+            'body': 'Another message for clearing'
+        }, format='json')
+        self.assertEqual(res_new.status_code, status.HTTP_201_CREATED)
+
+        # Mentor clears conversation with learner
+        res_clear = self.client.delete(f'/api/messages/clear?with={self.learner.id}')
+        self.assertEqual(res_clear.status_code, status.HTTP_200_OK)
+
+        # Mentor sees 0 messages
+        res_mentor_after = self.client.get(f'/api/messages?with={self.learner.id}')
+        self.assertEqual(len(res_mentor_after.data), 0)
+
+        # Learner STILL sees the message that was sent to them!
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        res_learner_after = self.client.get(f'/api/messages?with={self.mentor.id}')
+        self.assertEqual(len(res_learner_after.data), 1)
+
+    def test_chat_encryption_at_rest(self):
+        # 1. Learner sends confidential chat message
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.learner_token}')
+        secret_text = 'Confidential project details and discussion topic'
+        res_send = self.client.post('/api/messages', {
+            'receiver_id': self.mentor.id,
+            'body': secret_text
+        }, format='json')
+        self.assertEqual(res_send.status_code, status.HTTP_201_CREATED)
+        msg_id = res_send.data['id']
+
+        # 2. Verify encrypted at rest in Database
+        db_msg = Message.objects.get(id=msg_id)
+        self.assertTrue(db_msg.body.startswith('enc:v1:'))
+        self.assertNotIn(secret_text, db_msg.body)
+        self.assertEqual(db_msg.decrypted_body, secret_text)
+
+        # 3. Verify API endpoints decrypt on-the-fly for authorized participants
+        # Learner views conversation
+        res_learner = self.client.get(f'/api/messages?with={self.mentor.id}')
+        self.assertEqual(res_learner.status_code, status.HTTP_200_OK)
+        found_learner = [m for m in res_learner.data if m['id'] == msg_id]
+        self.assertEqual(len(found_learner), 1)
+        self.assertEqual(found_learner[0]['body'], secret_text)
+
+        # Mentor views conversation
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.mentor_token}')
+        res_mentor = self.client.get(f'/api/messages?with={self.learner.id}')
+        self.assertEqual(res_mentor.status_code, status.HTTP_200_OK)
+        found_mentor = [m for m in res_mentor.data if m['id'] == msg_id]
+        self.assertEqual(len(found_mentor), 1)
+        self.assertEqual(found_mentor[0]['body'], secret_text)
+
+        # Mentor views conversations list summary
+        res_conv = self.client.get('/api/messages/conversations')
+        self.assertEqual(res_conv.status_code, status.HTTP_200_OK)
+        conv = next((c for c in res_conv.data if c.get('user_id') == self.learner.id or c.get('other_id') == self.learner.id), None)
+        self.assertIsNotNone(conv)
+        self.assertEqual(conv['last_message'], secret_text)
+
+        # 4. Verify direct crypto helper behaves properly
+        from api.crypto import encrypt_text, decrypt_text
+        cipher = encrypt_text('hello secret')
+        self.assertTrue(cipher.startswith('enc:v1:'))
+        self.assertEqual(decrypt_text(cipher), 'hello secret')
+        # Idempotent (does not double encrypt)
+        self.assertEqual(encrypt_text(cipher), cipher)
+        # Legacy plain text backward compatibility
+        self.assertEqual(decrypt_text('legacy plain'), 'legacy plain')
 
     # --- 5. Reverse Problem Marketplace ---
     def test_problem_post_and_proposal_acceptance(self):

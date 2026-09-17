@@ -210,21 +210,125 @@ def mentor_detail(request, mentor_id):
     return success_response(data)
 
 
-@api_view(['PUT'])
+@api_view(['GET', 'PUT'])
 @permission_classes([IsAuthenticated, IsMentor])
 def update_own_profile(request):
     user = request.user
     profile, _ = MentorProfile.objects.get_or_create(user=user)
+
+    if request.method == 'GET':
+        data = format_mentor_row(profile)
+        data['bio'] = profile.bio or ''
+        data['github_url'] = profile.github_url
+        data['linkedin_url'] = profile.linkedin_url
+        data['portfolio_url'] = profile.portfolio_url
+        data['youtube_url'] = profile.youtube_url
+        data['x_url'] = profile.x_url
+        data['website_url'] = profile.website_url
+
+        reviews = Review.objects.filter(mentor_id=user.id).select_related('learner').order_by('-created_at')[:10]
+        data['reviews'] = [
+            {
+                'id': r.id,
+                'rating': r.rating,
+                'comment': r.comment or '',
+                'created_at': r.created_at.isoformat() if r.created_at else None,
+                'learner_name': r.learner.name,
+            }
+            for r in reviews
+        ]
+
+        exp = MentorExperience.objects.filter(user_id=user.id).order_by('-start_date')
+        data['experience'] = [
+            {
+                'id': e.id,
+                'job_title': e.job_title,
+                'company': e.company,
+                'start_date': e.start_date,
+                'end_date': e.end_date,
+                'description': e.description,
+                'sort_order': e.sort_order,
+            }
+            for e in exp
+        ]
+
+        proj = MentorProject.objects.filter(user_id=user.id).order_by('sort_order', 'id')
+        data['projects'] = [
+            {
+                'id': p.id,
+                'name': p.name,
+                'description': p.description,
+                'url': p.url,
+                'sort_order': p.sort_order,
+            }
+            for p in proj
+        ]
+
+        edu = MentorEducation.objects.filter(user_id=user.id).order_by('sort_order', 'id')
+        data['education'] = [
+            {
+                'id': ed.id,
+                'degree': ed.degree,
+                'university': ed.university,
+                'year': ed.year,
+                'sort_order': ed.sort_order,
+            }
+            for ed in edu
+        ]
+
+        certs = MentorCertification.objects.filter(user_id=user.id).order_by('sort_order', 'id')
+        data['certifications'] = [
+            {
+                'id': c.id,
+                'name': c.name,
+                'issuer': c.issuer,
+                'year': c.year,
+                'sort_order': c.sort_order,
+            }
+            for c in certs
+        ]
+
+        awards = MentorAward.objects.filter(user_id=user.id).order_by('sort_order', 'id')
+        data['awards'] = [
+            {
+                'id': a.id,
+                'title': a.title,
+                'year': a.year,
+                'description': a.description,
+                'sort_order': a.sort_order,
+            }
+            for a in awards
+        ]
+
+        avail = MentorAvailability.objects.filter(user_id=user.id).order_by('day_of_week', 'start_time')
+        data['availability'] = [
+            {
+                'id': av.id,
+                'day_of_week': av.day_of_week,
+                'start_time': av.start_time,
+                'end_time': av.end_time,
+            }
+            for av in avail
+        ]
+        return success_response(data)
+
     data = request.data or {}
 
+    if 'name' in data and data['name']:
+        user.name = str(data['name']).strip()
+        user.save(update_fields=['name'])
     if 'photo_url' in data:
         profile.photo_url = data.get('photo_url')
     if 'title' in data:
         profile.title = str(data.get('title', ''))
+    elif 'headline' in data:
+        profile.title = str(data.get('headline', ''))
     if 'company' in data:
         profile.company = str(data.get('company', ''))
     if 'years_experience' in data:
         profile.years_experience = int(data.get('years_experience', 0) or 0)
+    elif 'yearsExperience' in data:
+        profile.years_experience = int(data.get('yearsExperience', 0) or 0)
     if 'location' in data:
         profile.location = str(data.get('location', ''))
     if 'languages' in data:
@@ -241,12 +345,20 @@ def update_own_profile(request):
         profile.skills = str(skills)
     if 'hourly_rate' in data:
         profile.hourly_rate = float(data.get('hourly_rate', 0.0) or 0.0)
+    elif 'hourlyRate' in data:
+        profile.hourly_rate = float(data.get('hourlyRate', 0.0) or 0.0)
     if 'github_url' in data:
         profile.github_url = data.get('github_url')
+    elif 'githubUrl' in data:
+        profile.github_url = data.get('githubUrl')
     if 'linkedin_url' in data:
         profile.linkedin_url = data.get('linkedin_url')
+    elif 'linkedinUrl' in data:
+        profile.linkedin_url = data.get('linkedinUrl')
     if 'portfolio_url' in data:
         profile.portfolio_url = data.get('portfolio_url')
+    elif 'portfolioUrl' in data:
+        profile.portfolio_url = data.get('portfolioUrl')
     if 'youtube_url' in data:
         profile.youtube_url = data.get('youtube_url')
     if 'x_url' in data:
@@ -257,7 +369,7 @@ def update_own_profile(request):
         profile.online_status = 1 if data.get('online_status') else 0
 
     profile.save()
-    return success_response({'message': 'Profile updated'})
+    return success_response({'message': 'Profile updated', 'profile': format_mentor_row(profile)})
 
 
 @api_view(['PUT'])
@@ -359,3 +471,130 @@ def apply_as_mentor(request):
             'role': 'mentor',
         }
     })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_available_slots(request, mentor_id):
+    """
+    Returns available booking slots for a given mentor on a given date,
+    hiding any date and time slots already booked by other learners.
+    Query params:
+      - date: YYYY-MM-DD (defaults to today)
+      - duration: integer minutes (defaults to 60)
+      - step: integer minutes (defaults to 30)
+    """
+    from datetime import datetime
+    from ..slot_utils import generate_available_slots_for_date
+
+    # Validate mentor exists (check user id or profile id)
+    mentor_user = User.objects.filter(id=mentor_id, role='mentor').first()
+    if not mentor_user:
+        prof = MentorProfile.objects.filter(id=mentor_id).first()
+        if prof:
+            mentor_user = prof.user
+            mentor_id = mentor_user.id
+        else:
+            return error_response('Mentor not found', status.HTTP_404_NOT_FOUND)
+
+    date_str = request.GET.get('date', '').strip()
+    if not date_str:
+        target_date = datetime.now().date()
+    else:
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return error_response('Invalid date format. Expected YYYY-MM-DD', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    try:
+        duration = int(request.GET.get('duration', 60) or 60)
+    except (ValueError, TypeError):
+        duration = 60
+
+    if duration < 15 or duration > 240:
+        duration = 60
+
+    try:
+        step = int(request.GET.get('step', 30) or 30)
+    except (ValueError, TypeError):
+        step = 30
+
+    result = generate_available_slots_for_date(mentor_id, target_date, duration_minutes=duration, step_minutes=step)
+    result['mentor_id'] = mentor_id
+    result['date'] = target_date.strftime('%Y-%m-%d')
+    result['duration_minutes'] = duration
+    return success_response(result)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_booked_slots(request, mentor_id):
+    """
+    Returns list of upcoming busy time blocks for a mentor so learners can see booked windows.
+    """
+    from ..slot_utils import get_mentor_active_booked_windows
+
+    mentor_user = User.objects.filter(id=mentor_id, role='mentor').first()
+    if not mentor_user:
+        prof = MentorProfile.objects.filter(id=mentor_id).first()
+        if prof:
+            mentor_id = prof.user_id
+        else:
+            return error_response('Mentor not found', status.HTTP_404_NOT_FOUND)
+
+    booked_windows = get_mentor_active_booked_windows(mentor_id)
+    results = [
+        {
+            'start': start.isoformat(),
+            'end': end.isoformat(),
+            'date': start.strftime('%Y-%m-%d'),
+            'duration_minutes': int((end - start).total_seconds() / 60)
+        }
+        for start, end in booked_windows
+    ]
+    return success_response({'mentor_id': mentor_id, 'booked_slots': results})
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_available_dates(request, mentor_id):
+    """
+    Returns the list of upcoming calendar dates on which the mentor has
+    at least one available, unbooked slot.
+    Days where the mentor has no scheduled hours or where all slots are booked/past
+    are strictly omitted from this list.
+    """
+    from ..slot_utils import get_mentor_available_dates
+
+    mentor_user = User.objects.filter(id=mentor_id, role='mentor').first()
+    if not mentor_user:
+        prof = MentorProfile.objects.filter(id=mentor_id).first()
+        if prof:
+            mentor_id = prof.user_id
+        else:
+            return error_response('Mentor not found', status.HTTP_404_NOT_FOUND)
+
+    try:
+        duration = int(request.GET.get('duration', 60) or 60)
+    except (ValueError, TypeError):
+        duration = 60
+
+    if duration < 15 or duration > 240:
+        duration = 60
+
+    try:
+        days = int(request.GET.get('days', 14) or 14)
+    except (ValueError, TypeError):
+        days = 14
+
+    if days < 1 or days > 60:
+        days = 14
+
+    dates = get_mentor_available_dates(mentor_id, days_ahead=days, duration_minutes=duration)
+    return success_response({
+        'mentor_id': mentor_id,
+        'duration_minutes': duration,
+        'available_dates': dates,
+        'total_available_days': len(dates),
+    })
+

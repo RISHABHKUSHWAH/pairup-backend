@@ -28,6 +28,9 @@ urlpatterns = [
     # Mentors
     path('mentors', mentor_views.list_mentors, name='mentors-list'),
     path('mentors/<int:mentor_id>', mentor_views.mentor_detail, name='mentor-detail'),
+    path('mentors/<int:mentor_id>/available-dates', mentor_views.get_available_dates, name='mentor-available-dates'),
+    path('mentors/<int:mentor_id>/available-slots', mentor_views.get_available_slots, name='mentor-available-slots'),
+    path('mentors/<int:mentor_id>/booked-slots', mentor_views.get_booked_slots, name='mentor-booked-slots'),
     path('mentors/me', mentor_views.update_own_profile, name='mentor-me-update'),
     path('mentors/me/online-status', mentor_views.set_online_status, name='mentor-me-online-status'),
     path('mentors/me/photo', mentor_views.upload_photo, name='mentor-me-photo'),
@@ -52,6 +55,7 @@ urlpatterns = [
     path('bookings/<int:booking_id>/pay', booking_views.pay_booking, name='booking-pay'),
     path('bookings/<int:booking_id>/complete', booking_views.complete_booking, name='booking-complete'),
     path('bookings/<int:booking_id>/dispute', booking_views.dispute_booking, name='booking-dispute'),
+    path('bookings/<int:booking_id>/cancel', booking_views.cancel_booking, name='booking-cancel'),
     path('bookings/<int:booking_id>', booking_views.session_detail, name='booking-detail'),
     path('bookings/<int:booking_id>/notes', booking_views.session_notes, name='booking-notes'),
     path('bookings/<int:booking_id>/livekit-token', livekit_views.generate_livekit_token, name='booking-livekit-token'),
@@ -77,6 +81,11 @@ urlpatterns = [
     # Chat
     path('messages', chat_views.messages_endpoint, name='messages'),
     path('messages/conversations', chat_views.conversations, name='messages-conversations'),
+    path('messages/clear', chat_views.clear_conversation, name='messages-clear'),
+    path('messages/<int:message_id>', chat_views.delete_message, name='messages-delete-message'),
+    path('messages/upload', chat_views.upload_chat_attachment, name='messages-upload'),
+    path('messages/attachment/download', chat_views.download_chat_attachment, name='messages-download-attachment'),
+    path('messages/attachment/view', chat_views.view_chat_attachment, name='messages-view-attachment'),
 
     # Reviews
     path('reviews', review_views.reviews_endpoint, name='reviews'),
@@ -100,6 +109,7 @@ urlpatterns = [
     path('admin/users', admin_views.list_users, name='admin-users'),
     path('admin/all-users', admin_views.list_all_users, name='admin-all-users'),
     path('admin/users/<int:user_id>/switch-role', admin_views.admin_switch_user_role, name='admin-user-switch-role'),
+    path('admin/users/<int:user_id>/toggle-suspend', admin_views.admin_toggle_suspend_user, name='admin-user-toggle-suspend'),
     path('admin/payments', admin_views.list_payments, name='admin-payments'),
     path('admin/bookings', admin_views.list_bookings, name='admin-bookings'),
     path('admin/mentors/pending', admin_views.pending_mentors, name='admin-mentors-pending'),

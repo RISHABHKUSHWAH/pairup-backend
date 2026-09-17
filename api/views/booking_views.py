@@ -1,16 +1,19 @@
+from datetime import datetime, timedelta
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from django.db.models import Q
 from ..models import User, MentorProfile, Booking, Payment, SessionNote
 from ..permissions import IsLearner, IsMentor
-from ..helpers import error_response, success_response, get_commission_percent
+from ..helpers import error_response, success_response, get_commission_percent, log_audit
+from ..slot_utils import parse_iso_datetime, check_slot_conflict
 from ..notifications import (
     notify_booking_created,
     notify_booking_accepted,
     notify_payment_held,
     notify_session_completed,
     notify_dispute_raised,
+    notify_booking_cancelled,
 )
 
 
@@ -32,11 +35,47 @@ def create_booking(request):
         mentor_id = 0
 
     topic = str(data.get('topic', '')).strip()
-    duration = int(data.get('duration_minutes', 30) or 30)
+    try:
+        duration = int(data.get('duration_minutes', 30) or 30)
+    except (ValueError, TypeError):
+        duration = 30
+
+    if duration < 15 or duration > 240:
+        duration = 30
+
+    scheduled_at_raw = str(data.get('scheduled_at', '')).strip()
+    scheduled_at = None
+
+    if scheduled_at_raw:
+        req_start = parse_iso_datetime(scheduled_at_raw)
+        if not req_start:
+            return error_response(
+                'Invalid scheduled_at format. Expected ISO-8601 string (e.g. YYYY-MM-DDTHH:MM)',
+                status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+        now = datetime.now()
+        if req_start < now - timedelta(minutes=5):
+            return error_response('Cannot book a session in the past', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        has_conflict, _ = check_slot_conflict(mentor_id, req_start, duration)
+        if has_conflict:
+            return error_response(
+                'This date and time is already booked by another learner. Please select an available slot.',
+                status.HTTP_409_CONFLICT
+            )
+        scheduled_at = scheduled_at_raw
+
     try:
         price = float(data.get('price', 0))
     except (ValueError, TypeError):
         price = 0.0
+
+    if price <= 0 and mentor_id > 0:
+        prof = MentorProfile.objects.filter(user_id=mentor_id).first()
+        if prof and prof.hourly_rate:
+            price = round(float(prof.hourly_rate) * (duration / 60.0), 2)
+        else:
+            price = 50.0
 
     if mentor_id <= 0 or not topic or price <= 0:
         return error_response('mentor_id, topic, and price are required', status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -50,11 +89,19 @@ def create_booking(request):
         topic=topic,
         duration_minutes=duration,
         price=price,
+        scheduled_at=scheduled_at,
         status='pending'
     )
     notify_booking_created(booking)
     return success_response(
-        {'id': booking.id, 'message': 'Session requested. Waiting for mentor to accept.'},
+        {
+            'id': booking.id,
+            'message': 'Session requested. Waiting for mentor to accept.',
+            'duration_minutes': booking.duration_minutes,
+            'price': booking.price,
+            'scheduled_at': booking.scheduled_at,
+            'scheduled_time': booking.scheduled_at,
+        },
         status_code=status.HTTP_201_CREATED
     )
 
@@ -75,6 +122,7 @@ def list_mine(request):
             'duration_minutes': b.duration_minutes,
             'price': float(b.price),
             'scheduled_at': b.scheduled_at,
+            'scheduled_time': b.scheduled_at,
             'dispute_reason': b.dispute_reason,
             'disputed_by': b.disputed_by_id,
             'created_at': b.created_at.isoformat() if b.created_at else None,
@@ -82,6 +130,7 @@ def list_mine(request):
             'mentor_name': b.mentor.name,
         })
     return success_response(results)
+
 
 
 @api_view(['POST'])
@@ -169,6 +218,52 @@ def dispute_booking(request, booking_id):
 
     notify_dispute_raised(booking, reason, user)
     return success_response({'message': 'Dispute raised. Our team will review and resolve it.'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_booking(request, booking_id):
+    user = request.user
+    data = request.data or {}
+    reason = str(data.get('reason', '')).strip()
+
+    try:
+        booking = Booking.objects.select_related('learner', 'mentor').get(
+            Q(learner=user) | Q(mentor=user),
+            id=booking_id
+        )
+    except Booking.DoesNotExist:
+        return error_response('Booking not found or not yours', status.HTTP_404_NOT_FOUND)
+
+    if booking.status in ['completed', 'cancelled', 'disputed']:
+        return error_response(f'Cannot cancel a session that is already {booking.status}', status.HTTP_400_BAD_REQUEST)
+
+    booking.status = 'cancelled'
+    if reason:
+        booking.dispute_reason = f"Cancelled: {reason}"
+    booking.save()
+
+    refunded = False
+    payment = Payment.objects.filter(booking=booking, status='held').first()
+    if payment:
+        payment.status = 'refunded'
+        payment.save()
+        refunded = True
+
+    log_audit(
+        user,
+        'cancel_booking',
+        'Booking',
+        booking.id,
+        f"Cancelled by {user.role} {user.name}." + (f" Reason: {reason}" if reason else "") + (" Escrow refunded." if refunded else "")
+    )
+
+    notify_booking_cancelled(booking, user, reason)
+
+    msg = 'Session cancelled successfully.'
+    if refunded:
+        msg += ' Escrow payment has been refunded to the learner wallet.'
+    return success_response({'message': msg})
 
 
 @api_view(['GET'])
