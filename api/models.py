@@ -209,6 +209,10 @@ class Booking(models.Model):
     duration_minutes = models.IntegerField(default=30)
     price = models.FloatField(default=0.0)
     scheduled_at = models.CharField(max_length=50, null=True, blank=True)
+    reschedule_requested_at = models.CharField(max_length=50, null=True, blank=True)
+    reschedule_requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reschedule_requests')
+    reschedule_note = models.TextField(null=True, blank=True)
+    reschedule_status = models.CharField(max_length=20, null=True, blank=True)
     dispute_reason = models.TextField(null=True, blank=True)
     disputed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='disputes_raised')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -239,7 +243,7 @@ class Payment(models.Model):
 
     def __str__(self):
         ref = f"Booking #{self.booking_id}" if self.booking_id else f"Contract #{self.contract_id}"
-        return f"Payment #{self.id} for {ref}: ${self.amount} ({self.status})"
+        return f"Payment #{self.id} for {ref}: ₹{self.amount} ({self.status})"
 
 
 class Message(models.Model):

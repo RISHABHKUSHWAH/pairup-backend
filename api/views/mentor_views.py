@@ -29,6 +29,7 @@ def format_mentor_row(mentor_profile):
     completion_rate = round((completed / total_outcomes) * 100) if total_outcomes > 0 else None
 
     return {
+        'id': mentor_profile.user.id,
         'user_id': mentor_profile.user.id,
         'name': mentor_profile.user.name,
         'photo_url': mentor_profile.photo_url,
@@ -123,7 +124,7 @@ def mentor_detail(request, mentor_id):
     data['x_url'] = profile.x_url
     data['website_url'] = profile.website_url
 
-    reviews = Review.objects.filter(mentor_id=actual_user_id).select_related('learner').order_by('-created_at')[:10]
+    reviews = Review.objects.filter(mentor_id=actual_user_id).select_related('learner').order_by('-created_at')[:100]
     data['reviews'] = [
         {
             'rating': r.rating,

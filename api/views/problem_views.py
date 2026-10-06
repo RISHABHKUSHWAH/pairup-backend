@@ -87,13 +87,22 @@ def list_problems(request):
 
     qs = ProblemPost.objects.filter(status='open').select_related('learner').order_by('-created_at')
 
-    skill = request.GET.get('skill', '').strip()
-    if skill:
-        qs = qs.filter(skills__icontains=skill)
+    skill_param = (request.GET.get('skill') or request.GET.get('category') or '').strip()
+    if skill_param and skill_param.lower() != 'all':
+        skill_items = [s.strip() for s in skill_param.split(',') if s.strip() and s.strip().lower() != 'all']
+        if skill_items:
+            q_skills = Q()
+            for s in skill_items:
+                q_skills |= Q(skills__icontains=s) | Q(title__icontains=s)
+            qs = qs.filter(q_skills)
 
     search = request.GET.get('search', '').strip()
     if search:
         qs = qs.filter(Q(title__icontains=search) | Q(description__icontains=search))
+
+    # Exclude problems where the current mentor has already submitted a proposal
+    if request.user and request.user.is_authenticated and getattr(request.user, 'role', '') == 'mentor':
+        qs = qs.exclude(proposals__mentor=request.user)
 
     results = []
     for p in qs:

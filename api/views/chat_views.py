@@ -11,7 +11,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import status
 from django.db.models import Q, Max
 from django.utils import timezone
-from ..models import User, Message
+from ..models import User, Message, MentorProfile
 from ..helpers import error_response, success_response, check_leak_guard
 from ..notifications import notify_chat_message
 
@@ -156,6 +156,10 @@ def conversations(request):
         if cid and last_msg.contract:
             contract_title = last_msg.contract.title
 
+        mentor_profile = None
+        if partner.role == 'mentor':
+            mentor_profile = MentorProfile.objects.filter(user=partner).first()
+
         convos.append({
             'other_id': partner.id,
             'other_name': partner.name,
@@ -163,6 +167,8 @@ def conversations(request):
             'user_id': partner.id,
             'name': partner.name,
             'role': partner.role,
+            'title': mentor_profile.title if mentor_profile else None,
+            'hourly_rate': float(mentor_profile.hourly_rate) if mentor_profile and mentor_profile.hourly_rate is not None else None,
             'contract_id': cid,
             'contract_title': contract_title,
             'avatar': partner.name[:2].upper() if partner.name else 'U',

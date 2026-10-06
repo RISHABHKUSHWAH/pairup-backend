@@ -56,6 +56,9 @@ urlpatterns = [
     path('bookings/<int:booking_id>/complete', booking_views.complete_booking, name='booking-complete'),
     path('bookings/<int:booking_id>/dispute', booking_views.dispute_booking, name='booking-dispute'),
     path('bookings/<int:booking_id>/cancel', booking_views.cancel_booking, name='booking-cancel'),
+    path('bookings/<int:booking_id>/reschedule', booking_views.reschedule_booking, name='booking-reschedule'),
+    path('bookings/<int:booking_id>/reschedule/accept', booking_views.accept_reschedule, name='booking-reschedule-accept'),
+    path('bookings/<int:booking_id>/reschedule/deny', booking_views.deny_reschedule, name='booking-reschedule-deny'),
     path('bookings/<int:booking_id>', booking_views.session_detail, name='booking-detail'),
     path('bookings/<int:booking_id>/notes', booking_views.session_notes, name='booking-notes'),
     path('bookings/<int:booking_id>/livekit-token', livekit_views.generate_livekit_token, name='booking-livekit-token'),
@@ -144,6 +147,7 @@ urlpatterns = [
 
     # User Notifications (Mentors & Learners)
     path('notifications', notification_views.list_notifications, name='notifications-list'),
+    path('notifications/<int:notification_id>', notification_views.delete_notification, name='notification-delete'),
     path('notifications/<int:notification_id>/read', notification_views.mark_read, name='notification-mark-read'),
     path('notifications/mark-all-read', notification_views.mark_all_read, name='notifications-mark-all-read'),
     path('notifications/clear', notification_views.clear_notifications, name='notifications-clear'),

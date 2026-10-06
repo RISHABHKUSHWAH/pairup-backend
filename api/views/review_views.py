@@ -45,7 +45,7 @@ def create_review(request):
         return error_response('Booking not found, not yours, or not yet marked completed', status.HTTP_404_NOT_FOUND)
 
     if Review.objects.filter(booking=booking).exists():
-        return error_response('You have already reviewed this session', status.HTTP_409_CONFLICT)
+        return error_response('You have already reviewed this session. Submitted reviews are permanent and cannot be edited.', status.HTTP_409_CONFLICT)
 
     review = Review.objects.create(
         booking=booking,
@@ -99,6 +99,7 @@ def my_reviews(request):
     results = [
         {
             'id': r.id,
+            'booking_id': r.booking_id,
             'rating': r.rating,
             'comment': r.comment or '',
             'created_at': r.created_at.isoformat() if r.created_at else None,
@@ -106,6 +107,7 @@ def my_reviews(request):
             'mentor_name': r.mentor.name,
             'topic': r.booking.topic,
             'is_mine': r.learner_id == user.id,
+            'is_editable': False,
         }
         for r in qs
     ]

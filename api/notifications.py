@@ -150,7 +150,7 @@ def notify_booking_created(booking):
         create_notification(
             user=booking.mentor,
             title='New Session Request 📅',
-            message=f"{booking.learner.name} requested a {booking.duration_minutes}-min session on '{booking.topic}' (${booking.price:,.0f}).",
+            message=f"{booking.learner.name} requested a {booking.duration_minutes}-min session on '{booking.topic}' (₹{booking.price:,.0f}).",
             notification_type='session',
             link='/mentor/sessions',
         )
@@ -189,14 +189,14 @@ def notify_payment_held(booking, payment):
         create_notification(
             user=booking.mentor,
             title='Payment Locked in Escrow 🔒',
-            message=f"{booking.learner.name} paid ${payment.amount:,.0f} into escrow for '{booking.topic}'. Session is confirmed!",
+            message=f"{booking.learner.name} paid ₹{payment.amount:,.0f} into escrow for '{booking.topic}'. Session is confirmed!",
             notification_type='payment',
             link='/mentor/sessions',
         )
         create_notification(
             user=booking.learner,
             title='Payment Secured in Escrow 🛡️',
-            message=f"${payment.amount:,.0f} is held in escrow for '{booking.topic}'. Funds will only release after session completion.",
+            message=f"₹{payment.amount:,.0f} is held in escrow for '{booking.topic}'. Funds will only release after session completion.",
             notification_type='payment',
             link='/learner/sessions',
         )
@@ -213,7 +213,7 @@ def notify_session_completed(booking, payment=None):
         create_notification(
             user=booking.mentor,
             title='Escrow Funds Released! 💰',
-            message=f"${amount:,.0f} has been released to your balance for completed session '{booking.topic}'.",
+            message=f"₹{amount:,.0f} has been released to your balance for completed session '{booking.topic}'.",
             notification_type='payment',
             link='/mentor/earnings',
         )
@@ -262,6 +262,85 @@ def notify_chat_message(message):
         )
     except Exception as e:
         logger.warning(f"Error in notify_chat_message: {e}")
+
+
+def notify_session_rescheduled(booking, old_time, new_time, note, user):
+    """
+    Alerts the counterparty when a session is rescheduled directly.
+    """
+    try:
+        is_learner = user.id == booking.learner_id
+        recipient = booking.mentor if is_learner else booking.learner
+        link = '/mentor/sessions' if is_learner else '/learner/sessions'
+        snippet = f' Note: "{note}"' if note else ''
+        create_notification(
+            user=recipient,
+            title="Session Rescheduled 📅",
+            message=f"{user.name} rescheduled session '{booking.topic}' to {new_time}.{snippet}",
+            notification_type='session_rescheduled',
+            link=link,
+        )
+    except Exception as e:
+        logger.warning(f"Error in notify_session_rescheduled: {e}")
+
+
+def notify_reschedule_requested(booking, new_time, note, user):
+    """
+    Alerts mentor when learner requests a reschedule.
+    """
+    try:
+        is_learner = user.id == booking.learner_id
+        recipient = booking.mentor if is_learner else booking.learner
+        link = '/mentor/sessions' if is_learner else '/learner/sessions'
+        snippet = f' Note: "{note}"' if note else ''
+        create_notification(
+            user=recipient,
+            title="Reschedule Requested 📅",
+            message=f"{user.name} requested to reschedule session '{booking.topic}' to {new_time}.{snippet}",
+            notification_type='reschedule_request',
+            link=link,
+        )
+    except Exception as e:
+        logger.warning(f"Error in notify_reschedule_requested: {e}")
+
+
+def notify_reschedule_accepted(booking, new_time, user):
+    """
+    Alerts learner that mentor accepted the reschedule request.
+    """
+    try:
+        is_mentor = user.id == booking.mentor_id
+        recipient = booking.learner if is_mentor else booking.mentor
+        link = '/learner/sessions' if is_mentor else '/mentor/sessions'
+        create_notification(
+            user=recipient,
+            title="Reschedule Accepted 🎉",
+            message=f"{user.name} accepted your reschedule request for '{booking.topic}'. The new session time is {new_time}.",
+            notification_type='reschedule_accepted',
+            link=link,
+        )
+    except Exception as e:
+        logger.warning(f"Error in notify_reschedule_accepted: {e}")
+
+
+def notify_reschedule_denied(booking, reason, user):
+    """
+    Alerts learner that mentor declined the reschedule request.
+    """
+    try:
+        is_mentor = user.id == booking.mentor_id
+        recipient = booking.learner if is_mentor else booking.mentor
+        link = '/learner/sessions' if is_mentor else '/mentor/sessions'
+        snippet = f' Reason: "{reason}"' if reason else ''
+        create_notification(
+            user=recipient,
+            title="Reschedule Request Declined ❌",
+            message=f"{user.name} was unable to accept your reschedule request for '{booking.topic}'. The session remains at {booking.scheduled_at}.{snippet}",
+            notification_type='reschedule_declined',
+            link=link,
+        )
+    except Exception as e:
+        logger.warning(f"Error in notify_reschedule_denied: {e}")
 
 
 def notify_dispute_raised(booking, reason, disputed_by):

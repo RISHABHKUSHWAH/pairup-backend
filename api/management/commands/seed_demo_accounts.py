@@ -255,7 +255,7 @@ class Command(BaseCommand):
             Notification.objects.create(
                 user=alex,
                 title='New Problem Matching Your Skills 💡',
-                message="Sarah Connor posted: 'Django REST Framework custom token auth returning 401' (Budget: $600).",
+                message="Sarah Connor posted: 'Django REST Framework custom token auth returning 401' (Budget: ₹600).",
                 notification_type='problem',
                 link='/mentor/explore-problems',
                 is_read=False,
@@ -271,7 +271,7 @@ class Command(BaseCommand):
             Notification.objects.create(
                 user=alex,
                 title='Escrow Funds Released! 💰',
-                message='$750 has been released to your balance for completed session with Sarah Connor.',
+                message='₹750 has been released to your balance for completed session with Sarah Connor.',
                 notification_type='payment',
                 link='/mentor/earnings',
                 is_read=True,

@@ -14,6 +14,10 @@ from ..notifications import (
     notify_session_completed,
     notify_dispute_raised,
     notify_booking_cancelled,
+    notify_session_rescheduled,
+    notify_reschedule_requested,
+    notify_reschedule_accepted,
+    notify_reschedule_denied,
 )
 
 
@@ -109,7 +113,7 @@ def create_booking(request):
 def list_mine(request):
 
     user = request.user
-    bookings = Booking.objects.filter(Q(learner=user) | Q(mentor=user)).select_related('learner', 'mentor').prefetch_related('payments').order_by('-created_at')
+    bookings = Booking.objects.filter(Q(learner=user) | Q(mentor=user)).select_related('learner', 'mentor', 'review').prefetch_related('payments').order_by('-created_at')
 
     results = []
     for b in bookings:
@@ -126,6 +130,18 @@ def list_mine(request):
         fee = float(payment.platform_fee) if payment else round(float(b.price) * 0.1, 2)
         net = float(payment.amount - payment.platform_fee) if payment else round(float(b.price) * 0.9, 2)
 
+        review_data = None
+        try:
+            rev = b.review
+            review_data = {
+                'id': rev.id,
+                'rating': rev.rating,
+                'comment': rev.comment or '',
+                'created_at': rev.created_at.isoformat() if rev.created_at else None,
+            }
+        except Exception:
+            review_data = None
+
         results.append({
             'id': b.id,
             'learner_id': b.learner_id,
@@ -136,6 +152,10 @@ def list_mine(request):
             'price': float(b.price),
             'scheduled_at': b.scheduled_at,
             'scheduled_time': b.scheduled_at,
+            'reschedule_requested_at': b.reschedule_requested_at,
+            'reschedule_requested_by': b.reschedule_requested_by_id,
+            'reschedule_note': b.reschedule_note,
+            'reschedule_status': b.reschedule_status,
             'dispute_reason': b.dispute_reason,
             'disputed_by': b.disputed_by_id,
             'created_at': b.created_at.isoformat() if b.created_at else None,
@@ -145,6 +165,8 @@ def list_mine(request):
             'payment_id': payment.id if payment else None,
             'platform_fee': fee,
             'net_amount': net,
+            'has_review': review_data is not None,
+            'review': review_data,
         })
     return success_response(results)
 
@@ -283,6 +305,151 @@ def cancel_booking(request, booking_id):
     return success_response({'message': msg})
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def reschedule_booking(request, booking_id):
+    user = request.user
+    data = request.data or {}
+    new_scheduled_at = str(data.get('scheduled_at') or data.get('scheduled_time') or '').strip()
+    note = str(data.get('note') or data.get('reason') or '').strip()
+
+    if not new_scheduled_at:
+        return error_response('A new scheduled date and time is required', status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    try:
+        booking = Booking.objects.select_related('learner', 'mentor').get(
+            Q(learner=user) | Q(mentor=user),
+            id=booking_id
+        )
+    except Booking.DoesNotExist:
+        return error_response('Booking not found or not yours', status.HTTP_404_NOT_FOUND)
+
+    if booking.status in ['completed', 'cancelled', 'disputed']:
+        return error_response(f'Cannot reschedule a session that is already {booking.status}', status.HTTP_400_BAD_REQUEST)
+
+    old_time = booking.scheduled_at or 'unscheduled'
+
+    # If the requester is the learner, submit as a pending reschedule request for mentor approval
+    if user.id == booking.learner_id:
+        booking.reschedule_requested_at = new_scheduled_at
+        booking.reschedule_requested_by = user
+        booking.reschedule_note = note
+        booking.reschedule_status = 'pending'
+        booking.save()
+
+        notify_reschedule_requested(booking, new_scheduled_at, note, user)
+
+        log_audit(
+            user,
+            'reschedule_booking_requested',
+            'Booking',
+            booking.id,
+            f"Reschedule request submitted by learner {user.name} for {new_scheduled_at}." + (f" Note: {note}" if note else "")
+        )
+
+        return success_response({
+            'message': f"Reschedule request sent to {booking.mentor.name}. Awaiting mentor confirmation.",
+            'reschedule_status': 'pending',
+            'reschedule_requested_at': booking.reschedule_requested_at,
+        })
+    else:
+        # Mentor direct reschedule
+        booking.scheduled_at = new_scheduled_at
+        booking.reschedule_requested_at = None
+        booking.reschedule_status = None
+        booking.save()
+
+        notify_session_rescheduled(booking, old_time, new_scheduled_at, note, user)
+
+        log_audit(
+            user,
+            'reschedule_booking',
+            'Booking',
+            booking.id,
+            f"Rescheduled by mentor {user.name} from {old_time} to {new_scheduled_at}." + (f" Note: {note}" if note else "")
+        )
+
+        return success_response({
+            'message': f"Session rescheduled to {new_scheduled_at}.",
+            'scheduled_at': booking.scheduled_at,
+        })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def accept_reschedule(request, booking_id):
+    user = request.user
+    try:
+        booking = Booking.objects.select_related('learner', 'mentor').get(
+            Q(learner=user) | Q(mentor=user),
+            id=booking_id
+        )
+    except Booking.DoesNotExist:
+        return error_response('Booking not found or not yours', status.HTTP_404_NOT_FOUND)
+
+    if booking.reschedule_status != 'pending' or not booking.reschedule_requested_at:
+        return error_response('No pending reschedule request found for this booking', status.HTTP_400_BAD_REQUEST)
+
+    new_time = booking.reschedule_requested_at
+    booking.scheduled_at = new_time
+    booking.reschedule_status = 'accepted'
+    booking.save()
+
+    notify_reschedule_accepted(booking, new_time, user)
+
+    log_audit(
+        user,
+        'reschedule_accepted',
+        'Booking',
+        booking.id,
+        f"Reschedule accepted by {user.role} {user.name}. New time: {new_time}."
+    )
+
+    return success_response({
+        'message': f"Reschedule accepted. Session set for {booking.scheduled_at}.",
+        'scheduled_at': booking.scheduled_at,
+        'reschedule_status': 'accepted',
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def deny_reschedule(request, booking_id):
+    user = request.user
+    data = request.data or {}
+    reason = str(data.get('reason', '')).strip()
+
+    try:
+        booking = Booking.objects.select_related('learner', 'mentor').get(
+            Q(learner=user) | Q(mentor=user),
+            id=booking_id
+        )
+    except Booking.DoesNotExist:
+        return error_response('Booking not found or not yours', status.HTTP_404_NOT_FOUND)
+
+    if booking.reschedule_status != 'pending':
+        return error_response('No pending reschedule request found for this booking', status.HTTP_400_BAD_REQUEST)
+
+    booking.reschedule_status = 'declined'
+    booking.save()
+
+    notify_reschedule_denied(booking, reason, user)
+
+    log_audit(
+        user,
+        'reschedule_denied',
+        'Booking',
+        booking.id,
+        f"Reschedule denied by {user.role} {user.name}." + (f" Reason: {reason}" if reason else "")
+    )
+
+    return success_response({
+        'message': "Reschedule request denied. Session remains at original scheduled time.",
+        'scheduled_at': booking.scheduled_at,
+        'reschedule_status': 'declined',
+    })
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def session_detail(request, booking_id):
@@ -337,25 +504,40 @@ def session_notes(request, booking_id):
 def payments_mine(request):
     user = request.user
     payments = Payment.objects.filter(
-        Q(booking__learner=user) | Q(booking__mentor=user)
-    ).select_related('booking', 'booking__learner', 'booking__mentor').order_by('-created_at')
+        Q(booking__learner=user) | Q(booking__mentor=user) |
+        Q(contract__learner=user) | Q(contract__mentor=user)
+    ).select_related(
+        'booking', 'booking__learner', 'booking__mentor',
+        'contract', 'contract__learner', 'contract__mentor'
+    ).order_by('-created_at')
 
     results = []
     for p in payments:
         b = p.booking
+        c = p.contract
+        amt = round(float(p.amount or 0), 2)
+        fee = round(float(p.platform_fee or 0), 2)
+        net = round(amt - fee, 2)
+
+        learner_name = b.learner.name if b and b.learner else (c.learner.name if c and c.learner else 'Learner')
+        mentor_name = b.mentor.name if b and b.mentor else (c.mentor.name if c and c.mentor else 'Mentor')
+        topic = b.topic if b and b.topic else (c.title if c and c.title else 'Pairing Session')
+        booking_status = b.status if b else (c.status if c else None)
+
         results.append({
             'id': p.id,
-            'amount': float(p.amount),
-            'platform_fee': float(p.platform_fee),
-            'net_amount': float(p.amount - p.platform_fee),
+            'amount': amt,
+            'platform_fee': fee,
+            'net_amount': net,
             'status': p.status,
             'created_at': p.created_at.isoformat() if p.created_at else None,
-            'booking_id': b.id,
-            'topic': b.topic,
-            'booking_status': b.status,
-            'learner_name': b.learner.name,
-            'mentor_name': b.mentor.name,
-            'learner_id': b.learner_id,
-            'mentor_id': b.mentor_id,
+            'booking_id': b.id if b else None,
+            'contract_id': c.id if c else None,
+            'topic': topic,
+            'booking_status': booking_status,
+            'learner_name': learner_name,
+            'mentor_name': mentor_name,
+            'learner_id': b.learner_id if b else (c.learner_id if c else None),
+            'mentor_id': b.mentor_id if b else (c.mentor_id if c else None),
         })
     return success_response(results)

@@ -142,9 +142,10 @@ def list_notifications(request):
 def mark_read(request, notification_id):
     try:
         n = Notification.objects.get(id=notification_id, user=request.user)
-        n.is_read = True
-        n.save()
-        return success_response(serialize_notification(n))
+        payload = serialize_notification(n)
+        payload['is_read'] = True
+        n.delete()
+        return success_response(payload)
     except Notification.DoesNotExist:
         return error_response('Notification not found', status.HTTP_404_NOT_FOUND)
 
@@ -152,8 +153,8 @@ def mark_read(request, notification_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def mark_all_read(request):
-    Notification.objects.filter(user=request.user).update(is_read=True)
-    return success_response({'message': 'All notifications marked as read'})
+    Notification.objects.filter(user=request.user).delete()
+    return success_response({'message': 'All notifications marked as read and removed from system'})
 
 
 @api_view(['DELETE'])
@@ -161,3 +162,14 @@ def mark_all_read(request):
 def clear_notifications(request):
     Notification.objects.filter(user=request.user).delete()
     return success_response({'message': 'All notifications cleared'})
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_notification(request, notification_id):
+    try:
+        n = Notification.objects.get(id=notification_id, user=request.user)
+        n.delete()
+        return success_response({'message': 'Notification deleted successfully'})
+    except Notification.DoesNotExist:
+        return error_response('Notification not found', status.HTTP_404_NOT_FOUND)

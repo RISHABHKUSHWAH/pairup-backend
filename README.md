@@ -52,9 +52,10 @@ python manage.py create_admin "Admin Name" admin@example.com "adminsecret123"
 
 ### 4. Run the Development Server
 ```powershell
-python manage.py runserver 127.0.0.1:8080
+python manage.py runserver 0.0.0.0:8000
 ```
-The API is now live at `http://127.0.0.1:8080` (and Django Admin at `http://127.0.0.1:8080/admin/`).
+The API is now live at `http://127.0.0.1:8000` (and Django Admin at `http://127.0.0.1:8000/admin/`).
+(Or simply double-click `run_backend.bat` to automatically clean stale processes and launch).
 
 ---
 
